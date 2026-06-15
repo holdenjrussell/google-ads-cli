@@ -1,0 +1,28 @@
+{
+  "1234567890": {
+    "HEADLINE": [
+      "customers/1234567890/assets/4444444444",
+      "customers/1234567890/assets/5555555555",
+      "customers/1234567890/assets/6666666666"
+    ],
+    "LONG_HEADLINE": [
+      "customers/1234567890/assets/7777777777"
+    ],
+    "DESCRIPTION": [
+      "customers/1234567890/assets/8888888888",
+      "customers/1234567890/assets/9999999999"
+    ],
+    "MARKETING_IMAGE": [
+      "customers/1234567890/assets/1010101010"
+    ],
+    "SQUARE_MARKETING_IMAGE": [
+      "customers/1234567890/assets/1212121212"
+    ],
+    "PORTRAIT_MARKETING_IMAGE": [
+      "customers/1234567890/assets/1313131313"
+    ],
+    "CALL_TO_ACTION_SELECTION": [
+      "customers/1234567890/assets/1414141414"
+    ]
+  }
+}

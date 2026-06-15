@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "google-ads-cli"
+version = "0.1.0"
+description = "Installable Google Ads API warehouse, sync, research, planning, and mutation CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Holden Russell" }
+]
+dependencies = [
+  "psycopg[binary]>=3.2.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0"
+]
+
+[project.scripts]
+gads = "google_ads_cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/google_ads_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
