@@ -1799,32 +1799,34 @@ def store_gaql_rows(
 ) -> int:
     if not rows:
         return 0
+    params = [
+        (
+            run_id,
+            customer,
+            query_name,
+            source_resource,
+            get_path(row, "segments.date"),
+            row_hash(row, query_name),
+            query,
+            jsonb(row),
+        )
+        for row in rows
+    ]
     with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
-        for row in rows:
-            report_date = get_path(row, "segments.date")
-            cur.execute(
-                """
-                INSERT INTO google_gaql_rows (
-                    sync_run_id, customer_id, query_name, source_resource,
-                    report_date, row_hash, query, row_json, fetched_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
-                ON CONFLICT (customer_id, query_name, row_hash) DO UPDATE SET
-                    sync_run_id = excluded.sync_run_id,
-                    row_json = excluded.row_json,
-                    fetched_at = now()
-                """,
-                (
-                    run_id,
-                    customer,
-                    query_name,
-                    source_resource,
-                    report_date,
-                    row_hash(row, query_name),
-                    query,
-                    jsonb(row),
-                ),
+        cur.executemany(
+            """
+            INSERT INTO google_gaql_rows (
+                sync_run_id, customer_id, query_name, source_resource,
+                report_date, row_hash, query, row_json, fetched_at
             )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+            ON CONFLICT (customer_id, query_name, row_hash) DO UPDATE SET
+                sync_run_id = excluded.sync_run_id,
+                row_json = excluded.row_json,
+                fetched_at = now()
+            """,
+            params,
+        )
     return len(rows)
 
 
@@ -1867,40 +1869,41 @@ def store_core_generic_rows(
 ) -> int:
     if not rows:
         return 0
-    written = 0
+    params = [
+        (
+            customer,
+            surface,
+            core_entity_key(surface, row),
+            query_name,
+            source_resource,
+            row_hash(row, query_name),
+            query,
+            jsonb(core_selected_fields(row)),
+            jsonb(row),
+        )
+        for row in rows
+    ]
     with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
-        for row in rows:
-            cur.execute(
-                """
-                INSERT INTO google_core_generic (
-                    customer_id, surface, entity_key, query_name, source_resource,
-                    row_hash, query, selected_fields, row_json, fetched_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now())
-                ON CONFLICT (customer_id, surface, entity_key)
-                DO UPDATE SET
-                    query_name = excluded.query_name,
-                    source_resource = excluded.source_resource,
-                    row_hash = excluded.row_hash,
-                    query = excluded.query,
-                    selected_fields = excluded.selected_fields,
-                    row_json = excluded.row_json,
-                    fetched_at = now()
-                """,
-                (
-                    customer,
-                    surface,
-                    core_entity_key(surface, row),
-                    query_name,
-                    source_resource,
-                    row_hash(row, query_name),
-                    query,
-                    jsonb(core_selected_fields(row)),
-                    jsonb(row),
-                ),
+        cur.executemany(
+            """
+            INSERT INTO google_core_generic (
+                customer_id, surface, entity_key, query_name, source_resource,
+                row_hash, query, selected_fields, row_json, fetched_at
             )
-            written += 1
-    return written
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now())
+            ON CONFLICT (customer_id, surface, entity_key)
+            DO UPDATE SET
+                query_name = excluded.query_name,
+                source_resource = excluded.source_resource,
+                row_hash = excluded.row_hash,
+                query = excluded.query,
+                selected_fields = excluded.selected_fields,
+                row_json = excluded.row_json,
+                fetched_at = now()
+            """,
+            params,
+        )
+    return len(params)
 
 
 def extract_id(resource_name: Any) -> str:
@@ -1909,9 +1912,61 @@ def extract_id(resource_name: Any) -> str:
     return str(resource_name).rstrip("/").split("/")[-1]
 
 
+def upsert_core_ad_rows(customer: str, rows: list[dict[str, Any]]) -> int:
+    params = []
+    for row in rows:
+        ad_group_ad = row.get("adGroupAd") or {}
+        ad = ad_group_ad.get("ad") or {}
+        ad_id = str_or_empty(ad.get("id") or extract_id(ad.get("resourceName")))
+        ad_group_id = str_or_empty(get_path(row, "ad_group.id"))
+        if not ad_id:
+            continue
+        params.append(
+            (
+                customer,
+                ad_group_id,
+                ad_id,
+                str_or_empty(get_path(row, "campaign.id")),
+                ad.get("resourceName") or ad_group_ad.get("resourceName"),
+                ad.get("name"),
+                ad_group_ad.get("status"),
+                ad.get("type"),
+                jsonb(ad.get("finalUrls") or []),
+                ad.get("displayUrl"),
+                jsonb(ad_group_ad),
+            )
+        )
+    if not params:
+        return 0
+    with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO google_ads (
+                customer_id, ad_group_id, ad_id, campaign_id, resource_name,
+                name, status, ad_type, final_urls, display_url, raw, fetched_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, now())
+            ON CONFLICT (customer_id, ad_group_id, ad_id) DO UPDATE SET
+                campaign_id = excluded.campaign_id,
+                resource_name = excluded.resource_name,
+                name = excluded.name,
+                status = excluded.status,
+                ad_type = excluded.ad_type,
+                final_urls = excluded.final_urls,
+                display_url = excluded.display_url,
+                raw = excluded.raw,
+                fetched_at = now()
+            """,
+            params,
+        )
+    return len(params)
+
+
 def upsert_core_rows(customer: str, surface: str, rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0
+    if surface == "ad":
+        return upsert_core_ad_rows(customer, rows)
     with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
         for row in rows:
             if surface == "customer":
@@ -2068,45 +2123,6 @@ def upsert_core_rows(customer: str, surface: str, rows: list[dict[str, Any]]) ->
                         int_or_none(ad_group.get("targetCpaMicros")),
                         num_or_none(ad_group.get("targetRoas")),
                         jsonb(ad_group),
-                    ),
-                )
-            elif surface == "ad":
-                ad_group_ad = row.get("adGroupAd") or {}
-                ad = ad_group_ad.get("ad") or {}
-                ad_id = str_or_empty(ad.get("id") or extract_id(ad.get("resourceName")))
-                ad_group_id = str_or_empty(get_path(row, "ad_group.id"))
-                if not ad_id:
-                    continue
-                cur.execute(
-                    """
-                    INSERT INTO google_ads (
-                        customer_id, ad_group_id, ad_id, campaign_id, resource_name,
-                        name, status, ad_type, final_urls, display_url, raw, fetched_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, now())
-                    ON CONFLICT (customer_id, ad_group_id, ad_id) DO UPDATE SET
-                        campaign_id = excluded.campaign_id,
-                        resource_name = excluded.resource_name,
-                        name = excluded.name,
-                        status = excluded.status,
-                        ad_type = excluded.ad_type,
-                        final_urls = excluded.final_urls,
-                        display_url = excluded.display_url,
-                        raw = excluded.raw,
-                        fetched_at = now()
-                    """,
-                    (
-                        customer,
-                        ad_group_id,
-                        ad_id,
-                        str_or_empty(get_path(row, "campaign.id")),
-                        ad.get("resourceName") or ad_group_ad.get("resourceName"),
-                        ad.get("name"),
-                        ad_group_ad.get("status"),
-                        ad.get("type"),
-                        jsonb(ad.get("finalUrls") or []),
-                        ad.get("displayUrl"),
-                        jsonb(ad_group_ad),
                     ),
                 )
             elif surface == "keyword":
@@ -2323,129 +2339,140 @@ def upsert_core_rows(customer: str, surface: str, rows: list[dict[str, Any]]) ->
 def upsert_performance_rows(customer: str, level: str, rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0
-    with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
-        for row in rows:
-            report_date = get_path(row, "segments.date")
-            if not report_date:
-                continue
-            campaign_id = str_or_empty(get_path(row, "campaign.id"))
-            ad_group_id = str_or_empty(get_path(row, "ad_group.id"))
-            ad_id = str_or_empty(get_path(row, "ad_group_ad.ad.id"))
-            criterion_id = str_or_empty(get_path(row, "ad_group_criterion.criterion_id"))
-            asset_group_id = str_or_empty(get_path(row, "asset_group.id"))
-            search_term = str_or_empty(get_path(row, "search_term_view.search_term"))
-            cur.execute(
-                """
-                INSERT INTO google_performance_daily (
-                    customer_id, level, report_date, campaign_id, ad_group_id,
-                    ad_id, criterion_id, asset_group_id, search_term,
-                    campaign_name, ad_group_name, ad_name,
-                    campaign_channel_type, campaign_channel_sub_type,
-                    device, network, impressions, clicks, interactions,
-                    cost_micros, conversions, conversions_value,
-                    all_conversions, all_conversions_value, video_views, ctr,
-                    average_cpc_micros, average_cpm_micros,
-                    cost_per_conversion_micros, value_per_conversion, raw,
-                    fetched_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
-                ON CONFLICT (
-                    customer_id, level, report_date, campaign_id, ad_group_id,
-                    ad_id, criterion_id, asset_group_id, search_term, device, network
-                )
-                DO UPDATE SET
-                    campaign_name = excluded.campaign_name,
-                    ad_group_name = excluded.ad_group_name,
-                    ad_name = excluded.ad_name,
-                    campaign_channel_type = excluded.campaign_channel_type,
-                    campaign_channel_sub_type = excluded.campaign_channel_sub_type,
-                    impressions = excluded.impressions,
-                    clicks = excluded.clicks,
-                    interactions = excluded.interactions,
-                    cost_micros = excluded.cost_micros,
-                    conversions = excluded.conversions,
-                    conversions_value = excluded.conversions_value,
-                    all_conversions = excluded.all_conversions,
-                    all_conversions_value = excluded.all_conversions_value,
-                    video_views = excluded.video_views,
-                    ctr = excluded.ctr,
-                    average_cpc_micros = excluded.average_cpc_micros,
-                    average_cpm_micros = excluded.average_cpm_micros,
-                    cost_per_conversion_micros = excluded.cost_per_conversion_micros,
-                    value_per_conversion = excluded.value_per_conversion,
-                    raw = excluded.raw,
-                    fetched_at = now()
-                """,
+    performance_params = []
+    search_term_params = []
+    for row in rows:
+        report_date = get_path(row, "segments.date")
+        if not report_date:
+            continue
+        campaign_id = str_or_empty(get_path(row, "campaign.id"))
+        ad_group_id = str_or_empty(get_path(row, "ad_group.id"))
+        ad_id = str_or_empty(get_path(row, "ad_group_ad.ad.id"))
+        criterion_id = str_or_empty(get_path(row, "ad_group_criterion.criterion_id"))
+        asset_group_id = str_or_empty(get_path(row, "asset_group.id"))
+        search_term = str_or_empty(get_path(row, "search_term_view.search_term"))
+        performance_params.append(
+            (
+                customer,
+                level,
+                report_date,
+                campaign_id,
+                ad_group_id,
+                ad_id,
+                criterion_id,
+                asset_group_id,
+                search_term,
+                get_path(row, "campaign.name"),
+                get_path(row, "ad_group.name"),
+                get_path(row, "ad_group_ad.ad.name"),
+                get_path(row, "campaign.advertising_channel_type"),
+                get_path(row, "campaign.advertising_channel_sub_type"),
+                str_or_empty(get_path(row, "segments.device")),
+                str_or_empty(get_path(row, "segments.ad_network_type")),
+                int_or_none(get_path(row, "metrics.impressions")),
+                int_or_none(get_path(row, "metrics.clicks")),
+                int_or_none(get_path(row, "metrics.interactions")),
+                int_or_none(get_path(row, "metrics.cost_micros")),
+                num_or_none(get_path(row, "metrics.conversions")),
+                num_or_none(get_path(row, "metrics.conversions_value")),
+                num_or_none(get_path(row, "metrics.all_conversions")),
+                num_or_none(get_path(row, "metrics.all_conversions_value")),
+                int_or_none(get_path(row, "metrics.video_views")),
+                num_or_none(get_path(row, "metrics.ctr")),
+                int_or_none(get_path(row, "metrics.average_cpc")),
+                int_or_none(get_path(row, "metrics.average_cpm")),
+                int_or_none(get_path(row, "metrics.cost_per_conversion")),
+                num_or_none(get_path(row, "metrics.value_per_conversion")),
+                jsonb(row),
+            )
+        )
+        if level == "search_term" and search_term:
+            search_term_params.append(
                 (
                     customer,
-                    level,
                     report_date,
                     campaign_id,
                     ad_group_id,
-                    ad_id,
-                    criterion_id,
-                    asset_group_id,
                     search_term,
-                    get_path(row, "campaign.name"),
-                    get_path(row, "ad_group.name"),
-                    get_path(row, "ad_group_ad.ad.name"),
-                    get_path(row, "campaign.advertising_channel_type"),
-                    get_path(row, "campaign.advertising_channel_sub_type"),
-                    str_or_empty(get_path(row, "segments.device")),
-                    str_or_empty(get_path(row, "segments.ad_network_type")),
+                    get_path(row, "search_term_view.status"),
                     int_or_none(get_path(row, "metrics.impressions")),
                     int_or_none(get_path(row, "metrics.clicks")),
-                    int_or_none(get_path(row, "metrics.interactions")),
                     int_or_none(get_path(row, "metrics.cost_micros")),
                     num_or_none(get_path(row, "metrics.conversions")),
                     num_or_none(get_path(row, "metrics.conversions_value")),
-                    num_or_none(get_path(row, "metrics.all_conversions")),
-                    num_or_none(get_path(row, "metrics.all_conversions_value")),
-                    int_or_none(get_path(row, "metrics.video_views")),
-                    num_or_none(get_path(row, "metrics.ctr")),
-                    int_or_none(get_path(row, "metrics.average_cpc")),
-                    int_or_none(get_path(row, "metrics.average_cpm")),
-                    int_or_none(get_path(row, "metrics.cost_per_conversion")),
-                    num_or_none(get_path(row, "metrics.value_per_conversion")),
                     jsonb(row),
-                ),
-            )
-            if level == "search_term" and search_term:
-                cur.execute(
-                    """
-                    INSERT INTO google_search_terms (
-                        customer_id, report_date, campaign_id, ad_group_id,
-                        search_term, status, impressions, clicks, cost_micros,
-                        conversions, conversions_value, raw, fetched_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
-                    ON CONFLICT (customer_id, report_date, campaign_id, ad_group_id, search_term)
-                    DO UPDATE SET
-                        status = excluded.status,
-                        impressions = excluded.impressions,
-                        clicks = excluded.clicks,
-                        cost_micros = excluded.cost_micros,
-                        conversions = excluded.conversions,
-                        conversions_value = excluded.conversions_value,
-                        raw = excluded.raw,
-                        fetched_at = now()
-                    """,
-                    (
-                        customer,
-                        report_date,
-                        campaign_id,
-                        ad_group_id,
-                        search_term,
-                        get_path(row, "search_term_view.status"),
-                        int_or_none(get_path(row, "metrics.impressions")),
-                        int_or_none(get_path(row, "metrics.clicks")),
-                        int_or_none(get_path(row, "metrics.cost_micros")),
-                        num_or_none(get_path(row, "metrics.conversions")),
-                        num_or_none(get_path(row, "metrics.conversions_value")),
-                        jsonb(row),
-                    ),
                 )
-    return len(rows)
+            )
+    if not performance_params:
+        return 0
+    with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO google_performance_daily (
+                customer_id, level, report_date, campaign_id, ad_group_id,
+                ad_id, criterion_id, asset_group_id, search_term,
+                campaign_name, ad_group_name, ad_name,
+                campaign_channel_type, campaign_channel_sub_type,
+                device, network, impressions, clicks, interactions,
+                cost_micros, conversions, conversions_value,
+                all_conversions, all_conversions_value, video_views, ctr,
+                average_cpc_micros, average_cpm_micros,
+                cost_per_conversion_micros, value_per_conversion, raw,
+                fetched_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+            ON CONFLICT (
+                customer_id, level, report_date, campaign_id, ad_group_id,
+                ad_id, criterion_id, asset_group_id, search_term, device, network
+            )
+            DO UPDATE SET
+                campaign_name = excluded.campaign_name,
+                ad_group_name = excluded.ad_group_name,
+                ad_name = excluded.ad_name,
+                campaign_channel_type = excluded.campaign_channel_type,
+                campaign_channel_sub_type = excluded.campaign_channel_sub_type,
+                impressions = excluded.impressions,
+                clicks = excluded.clicks,
+                interactions = excluded.interactions,
+                cost_micros = excluded.cost_micros,
+                conversions = excluded.conversions,
+                conversions_value = excluded.conversions_value,
+                all_conversions = excluded.all_conversions,
+                all_conversions_value = excluded.all_conversions_value,
+                video_views = excluded.video_views,
+                ctr = excluded.ctr,
+                average_cpc_micros = excluded.average_cpc_micros,
+                average_cpm_micros = excluded.average_cpm_micros,
+                cost_per_conversion_micros = excluded.cost_per_conversion_micros,
+                value_per_conversion = excluded.value_per_conversion,
+                raw = excluded.raw,
+                fetched_at = now()
+            """,
+            performance_params,
+        )
+        if search_term_params:
+            cur.executemany(
+                """
+                INSERT INTO google_search_terms (
+                    customer_id, report_date, campaign_id, ad_group_id,
+                    search_term, status, impressions, clicks, cost_micros,
+                    conversions, conversions_value, raw, fetched_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+                ON CONFLICT (customer_id, report_date, campaign_id, ad_group_id, search_term)
+                DO UPDATE SET
+                    status = excluded.status,
+                    impressions = excluded.impressions,
+                    clicks = excluded.clicks,
+                    cost_micros = excluded.cost_micros,
+                    conversions = excluded.conversions,
+                    conversions_value = excluded.conversions_value,
+                    raw = excluded.raw,
+                    fetched_at = now()
+                """,
+                search_term_params,
+            )
+    return len(performance_params)
 
 
 def performance_dimensions(row: dict[str, Any]) -> dict[str, Any]:
@@ -2467,43 +2494,47 @@ def store_performance_generic_rows(
 ) -> int:
     if not rows:
         return 0
-    written = 0
-    with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
-        for row in rows:
-            report_date = get_path(row, "segments.date")
-            if not report_date:
-                continue
-            cur.execute(
-                """
-                INSERT INTO google_performance_generic (
-                    customer_id, surface, report_date, entity_key, query_name,
-                    row_hash, query, selected_dimensions, metrics, row_json,
-                    fetched_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, now())
-                ON CONFLICT (customer_id, surface, report_date, entity_key, row_hash)
-                DO UPDATE SET
-                    query = excluded.query,
-                    selected_dimensions = excluded.selected_dimensions,
-                    metrics = excluded.metrics,
-                    row_json = excluded.row_json,
-                    fetched_at = now()
-                """,
-                (
-                    customer,
-                    surface,
-                    report_date,
-                    dimension_key(row, query_name),
-                    query_name,
-                    row_hash(row, query_name),
-                    query,
-                    jsonb(performance_dimensions(row)),
-                    jsonb(row.get("metrics") or {}),
-                    jsonb(row),
-                ),
+    params = []
+    for row in rows:
+        report_date = get_path(row, "segments.date")
+        if not report_date:
+            continue
+        params.append(
+            (
+                customer,
+                surface,
+                report_date,
+                dimension_key(row, query_name),
+                query_name,
+                row_hash(row, query_name),
+                query,
+                jsonb(performance_dimensions(row)),
+                jsonb(row.get("metrics") or {}),
+                jsonb(row),
             )
-            written += 1
-    return written
+        )
+    if not params:
+        return 0
+    with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO google_performance_generic (
+                customer_id, surface, report_date, entity_key, query_name,
+                row_hash, query, selected_dimensions, metrics, row_json,
+                fetched_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, now())
+            ON CONFLICT (customer_id, surface, report_date, entity_key, row_hash)
+            DO UPDATE SET
+                query = excluded.query,
+                selected_dimensions = excluded.selected_dimensions,
+                metrics = excluded.metrics,
+                row_json = excluded.row_json,
+                fetched_at = now()
+            """,
+            params,
+        )
+    return len(params)
 
 
 CORE_QUERIES = {
@@ -4429,54 +4460,57 @@ def cmd_catalog_offline_fields(args: argparse.Namespace) -> int:
     ensure_schema()
     commit = clone_or_update(OFFICIAL_CLIENT_REPO, OFFICIAL_CLIENT_CACHE, refresh=args.refresh)
     rows = parse_offline_catalog_fields(OFFICIAL_CLIENT_CACHE)
+    params = [
+        (
+            row["api_version"],
+            row["resource"],
+            row["field_name"],
+            row["field_path"],
+            row["resource_kind"],
+            row["class_name"],
+            row["field_type"],
+            row["proto_type"],
+            row["enum_type"],
+            row["message_type"],
+            row["repeated"],
+            row["optional"],
+            row["description"],
+            row["source_file"],
+            jsonb(row["raw"]),
+        )
+        for row in rows
+    ]
     with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM google_offline_catalog_fields")
-        for row in rows:
-            cur.execute(
-                """
-                INSERT INTO google_offline_catalog_fields (
-                    api_version, resource, field_name, field_path, resource_kind,
-                    class_name, field_type, proto_type, enum_type, message_type,
-                    repeated, optional, description, source_file, raw, updated_at
-                )
-                VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s::jsonb, now()
-                )
-                ON CONFLICT (api_version, field_path) DO UPDATE SET
-                    resource = excluded.resource,
-                    field_name = excluded.field_name,
-                    resource_kind = excluded.resource_kind,
-                    class_name = excluded.class_name,
-                    field_type = excluded.field_type,
-                    proto_type = excluded.proto_type,
-                    enum_type = excluded.enum_type,
-                    message_type = excluded.message_type,
-                    repeated = excluded.repeated,
-                    optional = excluded.optional,
-                    description = excluded.description,
-                    source_file = excluded.source_file,
-                    raw = excluded.raw,
-                    updated_at = now()
-                """,
-                (
-                    row["api_version"],
-                    row["resource"],
-                    row["field_name"],
-                    row["field_path"],
-                    row["resource_kind"],
-                    row["class_name"],
-                    row["field_type"],
-                    row["proto_type"],
-                    row["enum_type"],
-                    row["message_type"],
-                    row["repeated"],
-                    row["optional"],
-                    row["description"],
-                    row["source_file"],
-                    jsonb(row["raw"]),
-                ),
+        cur.executemany(
+            """
+            INSERT INTO google_offline_catalog_fields (
+                api_version, resource, field_name, field_path, resource_kind,
+                class_name, field_type, proto_type, enum_type, message_type,
+                repeated, optional, description, source_file, raw, updated_at
             )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s::jsonb, now()
+            )
+            ON CONFLICT (api_version, field_path) DO UPDATE SET
+                resource = excluded.resource,
+                field_name = excluded.field_name,
+                resource_kind = excluded.resource_kind,
+                class_name = excluded.class_name,
+                field_type = excluded.field_type,
+                proto_type = excluded.proto_type,
+                enum_type = excluded.enum_type,
+                message_type = excluded.message_type,
+                repeated = excluded.repeated,
+                optional = excluded.optional,
+                description = excluded.description,
+                source_file = excluded.source_file,
+                raw = excluded.raw,
+                updated_at = now()
+            """,
+            params,
+        )
     by_version: dict[str, int] = {}
     by_kind: dict[str, int] = {}
     for row in rows:
@@ -4667,7 +4701,7 @@ def latest_auth_state() -> dict[str, Any]:
         )
         row = cur.fetchone()
     data = dict(row[0] or {}) if row else {}
-    data["latest_auth_error_summary"] = summarize_auth_error(data.get("latest_auth_error"))
+    data["latest_auth_error_summary"] = auth_blocker_from_latest(data)
     data.pop("latest_auth_error", None)
     return data
 
@@ -4696,7 +4730,7 @@ def auth_doctor_payload(*, include_tokeninfo: bool = True, reveal_email: bool = 
             identity_state = {"ok": False, "error": str(exc)}
 
     latest = latest_auth_state()
-    blocker = latest.get("latest_auth_error_summary")
+    blocker = auth_blocker_from_latest(latest)
     checks = [
         {
             "id": "credentials_present",
@@ -4846,24 +4880,25 @@ def cmd_auth_doctor(args: argparse.Namespace) -> int:
         print("\n## Next Steps\n")
         for step in payload.get("next_steps") or []:
             print(f"- {step}")
-        runbook = payload.get("access_runbook") or {}
-        print("\n## Access Grant Runbook\n")
-        print(f"- OAuth user: {runbook.get('oauth_user') or 'unknown'}")
-        print(f"- MCC: {runbook.get('manager_account_id') or 'missing'}")
-        print(f"- Customer: {runbook.get('customer_id') or 'missing'}")
-        print(f"- Recommended access: {runbook.get('recommended_access_level') or 'Standard'}")
-        if runbook.get("why_standard"):
-            print(f"- Why: {runbook['why_standard']}")
-        for index, step in enumerate(runbook.get("steps") or [], start=1):
-            print(f"{index}. {step}")
-        sources = runbook.get("sources") or []
-        if sources:
-            print("\nSources:")
-            for source in sources:
-                print(f"- {source}")
-        print("\n## Commands After Access\n")
-        for command in payload.get("commands_after_access") or []:
-            print(f"- `{command}`")
+        if not payload.get("ok"):
+            runbook = payload.get("access_runbook") or {}
+            print("\n## Access Grant Runbook\n")
+            print(f"- OAuth user: {runbook.get('oauth_user') or 'unknown'}")
+            print(f"- MCC: {runbook.get('manager_account_id') or 'missing'}")
+            print(f"- Customer: {runbook.get('customer_id') or 'missing'}")
+            print(f"- Recommended access: {runbook.get('recommended_access_level') or 'Standard'}")
+            if runbook.get("why_standard"):
+                print(f"- Why: {runbook['why_standard']}")
+            for index, step in enumerate(runbook.get("steps") or [], start=1):
+                print(f"{index}. {step}")
+            sources = runbook.get("sources") or []
+            if sources:
+                print("\nSources:")
+                for source in sources:
+                    print(f"- {source}")
+            print("\n## Commands After Access\n")
+            for command in payload.get("commands_after_access") or []:
+                print(f"- `{command}`")
     return 0 if payload.get("ok") else 2
 
 
@@ -9627,9 +9662,21 @@ def summarize_auth_error(message: str | None) -> str | None:
     lower = message.lower()
     if "not_ads_user" in lower:
         return "OAuth user is not attached to a Google Ads account (NOT_ADS_USER)."
+    if "invalid_rapt" in lower:
+        return "OAuth re-auth required (invalid_rapt). Rerun scripts/bootstrap_google_ads_oauth.sh and then gads auth-check."
+    if "invalid_grant" in lower and "reauth" in lower:
+        return "OAuth re-auth required. Rerun scripts/bootstrap_google_ads_oauth.sh and then gads auth-check."
     if "invalid authentication credentials" in lower or "missing required authentication credential" in lower:
         return "OAuth access token was rejected by Google Ads."
     return message[:320]
+
+
+def auth_blocker_from_latest(latest: dict[str, Any] | None) -> str | None:
+    if not latest:
+        return None
+    if latest.get("latest_auth_status") == "success":
+        return None
+    return latest.get("latest_auth_error_summary") or summarize_auth_error(latest.get("latest_auth_error"))
 
 
 def api_status_label(creds: dict[str, Any], direct: dict[str, Any]) -> str:
@@ -10476,7 +10523,7 @@ def cmd_catalog_summary(args: argparse.Namespace) -> int:
         """
     ) or {}
     if payload.get("latest_auth_error"):
-        payload["latest_auth_error_summary"] = summarize_auth_error(str(payload["latest_auth_error"]))
+        payload["latest_auth_error_summary"] = auth_blocker_from_latest(payload)
         payload.pop("latest_auth_error", None)
     if args.format == "json":
         print(json.dumps(payload, indent=2, default=str))
@@ -11111,7 +11158,7 @@ def completion_audit_payload() -> dict[str, Any]:
     direct_bootstrap_log = google_direct_job_log_state(DIRECT_BOOTSTRAP_JOB)
     auth_blocker = None
     if counts.get("latest_auth_status") != "success" and counts.get("latest_auth_error"):
-        auth_blocker = summarize_auth_error(str(counts.get("latest_auth_error") or ""))
+        auth_blocker = auth_blocker_from_latest(counts)
     not_ads_user = bool(auth_blocker and "NOT_ADS_USER" in auth_blocker)
     recurring_slack_policy_ok = bool(slack_report_log.get("raw_oauth_blocker_muted"))
     source_router_state = google_ads_source_router_state()
@@ -11764,7 +11811,7 @@ def cmd_status(_: argparse.Namespace) -> int:
         """
     )
     if counts and counts.get("latest_auth_error"):
-        counts["latest_auth_error_summary"] = summarize_auth_error(str(counts["latest_auth_error"]))
+        counts["latest_auth_error_summary"] = auth_blocker_from_latest(counts)
         counts.pop("latest_auth_error", None)
     print(json.dumps({"credentials": state, "warehouse": counts}, indent=2))
     return 0

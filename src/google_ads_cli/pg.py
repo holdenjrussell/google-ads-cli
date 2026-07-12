@@ -57,7 +57,6 @@ def connect(*, schema: str | None = None, application_name: str = "google-ads-cl
         with conn.cursor() as cur:
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(schema)}")
             cur.execute(f"SET search_path TO {quote_ident(schema)}, public")
-        conn.commit()
     return conn
 
 
