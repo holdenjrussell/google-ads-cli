@@ -53,14 +53,23 @@ gads query-manifest --format summary
 2. Validate the output JSON:
 
 ```bash
-gads mutate ~/.google-ads-cli/mutation-plans/<plan-id>.json
+gads mutate --customer-id <id> ~/.google-ads-cli/mutation-plans/<plan-id>.json
 ```
 
 3. Only after explicit human approval, run:
 
 ```bash
-gads mutate ~/.google-ads-cli/mutation-plans/<plan-id>.json --confirm-live
+gads mutate --customer-id <id> ~/.google-ads-cli/mutation-plans/<plan-id>.json --confirm-live
 ```
+
+> **Always pass `--customer-id` to `mutate`.** Omitting it does not fail: it
+> falls back to the configured default account (`GOOGLE_ADS_CUSTOMER_ID`, in
+> practice CGK Linens `7304176160`) and sends the mutate to that account's
+> endpoint. A plan built elsewhere is rejected on mismatched
+> `customers/<id>/...` resource names, but it still burns DEVELOPER-scoped
+> quota — and a plan whose names *did* resolve there would apply to the wrong
+> account. `plan-*` records the customer in the plan file; `mutate` does not
+> read it back. Verified 2026-08-06.
 
 ## Common Commands
 
