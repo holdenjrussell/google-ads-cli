@@ -89,6 +89,14 @@ gads report --format json
 gads completion-audit
 ```
 
+## Weekly Review
+
+The CGK family runs a weekly Google Ads review (Ampd lane, website lane with
+Northbeam, Beckham Home and SafeRest via PixelMe). Procedure, windows, rules
+and the pull/render scripts: `docs/weekly-review.md` and
+`scripts/weekly_review/`. Read the Obsidian analysis log and account
+changelog before proposing changes; log every change afterwards.
+
 ## Safety
 
 - Default to read-only or validate-only.
