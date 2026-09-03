@@ -6892,7 +6892,9 @@ def bidding_scheme(
     if strategy == "manual_cpc":
         return {"manualCpc": {}}
     if strategy == "maximize_clicks":
-        return {"maximizeClicks": {}}
+        # The API field for Maximize Clicks is target_spend (there is no
+        # campaign.maximize_clicks).
+        return {"targetSpend": {}}
     if strategy == "maximize_conversions":
         scheme: dict[str, Any] = {"maximizeConversions": {}}
         if target_cpa_dollars is not None:
@@ -6916,14 +6918,17 @@ def bidding_scheme(
 
 def bidding_update_mask(strategy: str, *, target_cpa_dollars: float | None, target_roas: float | None) -> str:
     strategy = strategy.lower().replace("-", "_")
+    # Google rejects a mask that names a message-typed field without a subfield
+    # (FIELD_HAS_SUBFIELDS, hit live 2026-09-03 on maximize_conversions), so
+    # every strategy lists its leaf field even when that leaf stays unset.
     if strategy == "manual_cpc":
-        return "manual_cpc"
+        return "manual_cpc.enhanced_cpc_enabled"
     if strategy == "maximize_clicks":
-        return "maximize_clicks"
+        return "target_spend.cpc_bid_ceiling_micros"
     if strategy == "maximize_conversions":
-        return "maximize_conversions.target_cpa_micros" if target_cpa_dollars is not None else "maximize_conversions"
+        return "maximize_conversions.target_cpa_micros"
     if strategy == "maximize_conversion_value":
-        return "maximize_conversion_value.target_roas" if target_roas is not None else "maximize_conversion_value"
+        return "maximize_conversion_value.target_roas"
     if strategy == "target_cpa":
         return "target_cpa.target_cpa_micros"
     if strategy == "target_roas":

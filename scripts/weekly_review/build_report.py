@@ -378,7 +378,7 @@ t_changelog = table(['Date', 'Account', 'Actor', 'Change', 'Evidence'], [[a, b, 
 
 analysis_log = [
     ('2026-08-06', 'CGK Google Ads & Ampd Performance Review (PDF, 11 pp)', 'Jul-2 account compromise ($9,516, 82 MEC campaigns); amazon-class keywords dark since 07-21; 23/31 Ampd campaigns on Maximize Clicks; $3.7k July spend unattributed; AACOS definition + mirror-coverage traps fixed', '~/Downloads/CGK-Google-Ads-Ampd-Review-2026-08-06.pdf'),
-    ('2026-08-13', 'Amazon-class block diagnosis + keyword-split runbook', 'Block is Google-side and CGK-specific (SafeRest unaffected); appeal drafted for Holden; do not raise bids to compensate', '~/Downloads/google-ads-appeal-amazon-keywords.md · ~/.hermes/state/ampd/keyword-split-20260813-runbook.md'),
+    ('2026-08-13', 'Amazon-class block diagnosis + keyword-split runbook', 'Block is Google-side and CGK-specific (SafeRest unaffected); appeal drafted for Holden; do not raise bids to compensate', '~/Downloads/google-ads-appeal-amazon-keywords.md · <hermes-state-dir>/state/ampd/keyword-split-20260813-runbook.md'),
     ('2026-08-24', 'Ampd vs Website audit (artifact)', 'Two-lane audit, 18 confirmed findings; DG at 0.62 ROAS; bleeders (Fleece 90%, Duvet 72%); scale list; 21736166343 never linked', 'claude.ai/code/artifact/3341ca90-0d95-42cb-b809-aed4e6e880a3'),
     ('2026-08-26', 'Audit execution', '24 mutation plans / 270 operations live; 5 owner overrides; new campaigns 24182840078, 24176957259, 24177022254', 'Slack recaps per plan; memory project-cgk-gads-audit-execution-20260826'),
     ('2026-09-03', 'Weekly review #1 (this document)', 'First run of the weekly format across CGK Ampd, CGK website (with Northbeam), Beckham Home, SafeRest', 'this file'),
