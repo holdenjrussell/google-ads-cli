@@ -1,584 +1,409 @@
-# Weekly review edition 2026-09-03 — see docs/weekly-review.md. Runs from its own directory: pull.py writes ./data, this file reads it.
+# Weekly review edition 2026-09-03 v2 (readability pass) — see docs/weekly-review.md. Runs from its own directory: pull.py writes ./data, this file reads it.
 #!/usr/bin/env python3
-"""Compose the CGK Google Ads / Ampd / PixelMe weekly review as HTML, then print to PDF.
+"""CGK Google Ads weekly review, edition 2026-09-03 v2 (readability pass).
 
-Claude composes the document; this script only renders the tables and inline SVG
-charts from the warehouse pulls in ./data (see pull.py) so every number in the
-document traces to a saved query result.
+Reads ./data/*.json written by pull.py plus the live reads recorded in the
+constants below; renders tables and inline-SVG charts. Prose is composed here.
 """
-import json, os, base64, datetime, subprocess, sys
-S = os.path.dirname(os.path.abspath(__file__))
-D = os.path.join(S, 'data')
+import json, os, base64, datetime
+S = os.path.dirname(os.path.abspath(__file__)); D = os.path.join(S, 'data')
 def load(n): return json.load(open(os.path.join(D, n + '.json')))
 def tsv(n):
     rows = [l.rstrip('\n').split('\t') for l in open(os.path.join(D, n + '.tsv'))]
     return [dict(zip(rows[0], r)) for r in rows[1:]]
-
-NAVY, DEEP, POWDER, LINEN, GOLD, INK, OFFWHITE, HERO = '#182f5c', '#1f3d77', '#d7e7f3', '#ede6df', '#d29b28', '#121212', '#fafafa', '#c5e6ff'
-
+NAVY, DEEP, POWDER, LINEN, GOLD, INK = '#182f5c', '#1f3d77', '#d7e7f3', '#ede6df', '#d29b28', '#121212'
 def money(v, dec=0):
     if v is None: return '—'
-    v = float(v)
-    return ('-' if v < 0 else '') + '$' + (f'{abs(v):,.{dec}f}')
-def pct(v, dec=1):
-    if v is None: return '—'
-    return f'{float(v)*100:.{dec}f}%'
-def num(v, dec=0):
-    if v is None: return '—'
-    return f'{float(v):,.{dec}f}'
-def x(v, dec=2):
-    if v is None: return '—'
-    return f'{float(v):.{dec}f}x'
+    v = float(v); return ('-' if v < 0 else '') + '$' + f'{abs(v):,.{dec}f}'
+def pct(v, dec=0):
+    return '—' if v is None else f'{float(v)*100:.{dec}f}%'
+def num(v): return '—' if v is None else f'{float(v):,.0f}'
+def x(v, dec=2): return '—' if v is None else f'{float(v):.{dec}f}x'
+def dt(s): return datetime.date.fromisoformat(s)
 
 LOGO = os.path.join(S, 'cgk-logo-blue.png')
-logo_tag = ''
-if os.path.exists(LOGO):
-    b64 = base64.b64encode(open(LOGO, 'rb').read()).decode()
-    logo_tag = f'<img class="logo" src="data:image/png;base64,{b64}" alt="CGK Linens">'
-else:
-    logo_tag = '<div class="wordmark">CGK LINENS</div>'
+logo_tag = f'<img class="logo" src="data:image/png;base64,{base64.b64encode(open(LOGO,"rb").read()).decode()}" alt="CGK Linens">' if os.path.exists(LOGO) else '<div class="wordmark">CGK LINENS</div>'
 
-# ---------------------------------------------------------------- charts
-def line_area_chart(series, width=980, height=250, y_fmt=lambda v: money(v), markers=(), title=''):
-    """series: list of dicts {name, points:[(date, value)], kind:'area'|'line', color, dash}. One shared $ axis."""
-    pad_l, pad_r, pad_t, pad_b = 62, 16, 26, 34
+# ------------------------------------------------------------------ charts
+def line_area_chart(series, width=980, height=205, markers=(), title=''):
+    pad_l, pad_r, pad_t, pad_b = 60, 14, 26, 34
     all_dates = sorted({d for s in series for d, _ in s['points']})
-    if not all_dates: return ''
-    d0, d1 = all_dates[0], all_dates[-1]
-    span = max(1, (d1 - d0).days)
+    d0, d1 = all_dates[0], all_dates[-1]; span = max(1, (d1 - d0).days)
     ymax = max(v for s in series for _, v in s['points'] if v is not None) * 1.08
-    def X(d): return pad_l + (d - d0).days / span * (width - pad_l - pad_r)
-    def Y(v): return pad_t + (1 - v / ymax) * (height - pad_t - pad_b)
-    out = [f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-label="{title}">']
-    # grid
-    steps = 4
-    for i in range(steps + 1):
-        v = ymax / steps * i
-        y = Y(v)
-        out.append(f'<line x1="{pad_l}" x2="{width-pad_r}" y1="{y:.1f}" y2="{y:.1f}" stroke="{LINEN}" stroke-width="1"/>')
-        out.append(f'<text x="{pad_l-8}" y="{y+4:.1f}" text-anchor="end" class="axis">{y_fmt(v)}</text>')
-    # x ticks: first of month + every 10 days
-    d = d0
-    while d <= d1:
-        if d.day in (1, 11, 21):
-            out.append(f'<text x="{X(d):.1f}" y="{height-12}" text-anchor="middle" class="axis">{d.strftime("%b %d")}</text>')
-        d += datetime.timedelta(days=1)
-    for mi, (md, label) in enumerate(markers):
-        if d0 <= md <= d1:
-            out.append(f'<line x1="{X(md):.1f}" x2="{X(md):.1f}" y1="{pad_t}" y2="{height-pad_b}" stroke="{INK}" stroke-width="1" stroke-dasharray="3 3" opacity="0.55"/>')
-            anchor = 'end' if X(md) > width * 0.7 else 'start'
-            xx = X(md) - 4 if anchor == 'end' else X(md) + 4
-            out.append(f'<text x="{xx:.1f}" y="{pad_t+10+12*(mi%2)}" text-anchor="{anchor}" class="axis marker">{label}</text>')
-    for s in series:
-        pts = [(X(d), Y(v)) for d, v in s['points'] if v is not None]
-        if not pts: continue
-        path = 'M' + ' L'.join(f'{px:.1f},{py:.1f}' for px, py in pts)
-        if s.get('kind') == 'area':
-            base = height - pad_b
-            area = path + f' L{pts[-1][0]:.1f},{base} L{pts[0][0]:.1f},{base} Z'
-            out.append(f'<path d="{area}" fill="{s["color"]}" opacity="0.9"/>')
-            out.append(f'<path d="{path}" fill="none" stroke="{DEEP}" stroke-width="1.2"/>')
-        else:
-            dash = f' stroke-dasharray="{s["dash"]}"' if s.get('dash') else ''
-            out.append(f'<path d="{path}" fill="none" stroke="{s["color"]}" stroke-width="2"{dash} stroke-linejoin="round"/>')
-    # legend
-    lx = pad_l
-    for s in series:
-        sw = f'<rect x="{lx}" y="{height-8}" width="14" height="6" fill="{s["color"] if s.get("kind")=="area" else s["color"]}"/>' if s.get('kind') == 'area' else f'<line x1="{lx}" x2="{lx+14}" y1="{height-5}" y2="{height-5}" stroke="{s["color"]}" stroke-width="2"/>'
-        out.append(sw)
-        out.append(f'<text x="{lx+18}" y="{height-1}" class="axis">{s["name"]}</text>')
-        lx += 18 + 7 * len(s['name']) + 22
-    out.append('</svg>')
-    return '\n'.join(out)
-
-def bar_chart(cats, series, width=980, height=230, y_fmt=lambda v: money(v), title=''):
-    """grouped bars; series: [{name,color,values}]"""
-    pad_l, pad_r, pad_t, pad_b = 62, 16, 22, 40
-    n = len(cats); k = len(series)
-    ymax = max(v for s in series for v in s['values'] if v is not None) * 1.12
-    slot = (width - pad_l - pad_r) / n
-    bw = slot * 0.72 / k
-    def Y(v): return pad_t + (1 - v / ymax) * (height - pad_t - pad_b)
+    X = lambda d: pad_l + (d - d0).days / span * (width - pad_l - pad_r)
+    Y = lambda v: pad_t + (1 - v / ymax) * (height - pad_t - pad_b)
     out = [f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-label="{title}">']
     for i in range(5):
         v = ymax / 4 * i; y = Y(v)
         out.append(f'<line x1="{pad_l}" x2="{width-pad_r}" y1="{y:.1f}" y2="{y:.1f}" stroke="{LINEN}"/>')
-        out.append(f'<text x="{pad_l-8}" y="{y+4:.1f}" text-anchor="end" class="axis">{y_fmt(v)}</text>')
-    base = height - pad_b
-    for ci, c in enumerate(cats):
-        x0 = pad_l + ci * slot + slot * 0.14
-        for si, s in enumerate(series):
-            v = s['values'][ci]
-            if v is None: continue
-            bx = x0 + si * (bw + 2)
-            out.append(f'<rect x="{bx:.1f}" y="{Y(v):.1f}" width="{bw-2:.1f}" height="{base-Y(v):.1f}" fill="{s["color"]}" rx="3"/>')
-        out.append(f'<text x="{pad_l + ci*slot + slot/2:.1f}" y="{height-22}" text-anchor="middle" class="axis">{c}</text>')
+        out.append(f'<text x="{pad_l-8}" y="{y+4:.1f}" text-anchor="end" class="axis">{money(v)}</text>')
+    d = d0
+    while d <= d1:
+        if d.day in (1, 15): out.append(f'<text x="{X(d):.1f}" y="{height-12}" text-anchor="middle" class="axis">{d.strftime("%b %d")}</text>')
+        d += datetime.timedelta(days=1)
+    for mi, (md, label) in enumerate(markers):
+        if d0 <= md <= d1:
+            out.append(f'<line x1="{X(md):.1f}" x2="{X(md):.1f}" y1="{pad_t}" y2="{height-pad_b}" stroke="{INK}" stroke-dasharray="3 3" opacity="0.5"/>')
+            anchor = 'end' if X(md) > width * 0.7 else 'start'; xx = X(md) - 4 if anchor == 'end' else X(md) + 4
+            out.append(f'<text x="{xx:.1f}" y="{pad_t+10+12*(mi%2)}" text-anchor="{anchor}" class="axis marker">{label}</text>')
+    for s in series:
+        pts = [(X(d), Y(v)) for d, v in s['points'] if v is not None]
+        path = 'M' + ' L'.join(f'{px:.1f},{py:.1f}' for px, py in pts)
+        if s.get('kind') == 'area':
+            base = height - pad_b
+            out.append(f'<path d="{path} L{pts[-1][0]:.1f},{base} L{pts[0][0]:.1f},{base} Z" fill="{POWDER}"/>')
+            out.append(f'<path d="{path}" fill="none" stroke="{DEEP}" stroke-width="1.2"/>')
+        else:
+            out.append(f'<path d="{path}" fill="none" stroke="{NAVY}" stroke-width="2" stroke-linejoin="round"/>')
     lx = pad_l
     for s in series:
-        out.append(f'<rect x="{lx}" y="{height-9}" width="12" height="8" fill="{s["color"]}" rx="2"/>')
-        out.append(f'<text x="{lx+16}" y="{height-1}" class="axis">{s["name"]}</text>')
-        lx += 16 + 7 * len(s['name']) + 22
-    out.append('</svg>')
-    return '\n'.join(out)
+        out.append(f'<rect x="{lx}" y="{height-9}" width="14" height="7" fill="{POWDER if s.get("kind")=="area" else NAVY}"/>')
+        out.append(f'<text x="{lx+18}" y="{height-2}" class="axis">{s["name"]}</text>'); lx += 18 + 6.6 * len(s['name']) + 24
+    out.append('</svg>'); return '\n'.join(out)
 
-# ---------------------------------------------------------------- data
+# ------------------------------------------------------------------ data
 ad = {r['d']: r for r in tsv('ampd_daily_mirror')}
 gl = load('cgk_daily_lane')
-ampd_spend_daily = {r['d']: float(r['spend']) for r in gl if r['lane'] == 'ampd'}
-web_daily = {r['d']: r for r in gl if r['lane'] == 'website'}
-def dt(s): return datetime.date.fromisoformat(s)
-ampd_pts_spend = [(dt(d), ampd_spend_daily[d]) for d in sorted(ampd_spend_daily) if d <= '2026-09-01']
-ampd_pts_rev = [(dt(d), float(ad[d]['rev']) + float(ad[d]['brb'])) for d in sorted(ad) if d >= '2026-06-01']
+ampd_spend = {r['d']: float(r['spend']) for r in gl if r['lane'] == 'ampd'}
+web = {r['d']: r for r in gl if r['lane'] == 'website'}
 chart_ampd = line_area_chart([
-    {'name': 'Google spend on [Ampd] campaigns', 'points': ampd_pts_spend, 'kind': 'area', 'color': POWDER},
-    {'name': 'Amazon attributed revenue + BRB (Ampd)', 'points': ampd_pts_rev, 'kind': 'line', 'color': NAVY},
-], markers=[(dt('2026-07-21'), 'amazon-class block'), (dt('2026-08-21'), 'block lifted'), (dt('2026-08-26'), 'audit executed')],
-   title='Ampd lane daily spend vs attributed revenue')
-
-web_pts_spend = [(dt(d), float(r['spend'])) for d, r in sorted(web_daily.items())]
-web_pts_val = [(dt(d), float(r['conv_value'])) for d, r in sorted(web_daily.items())]
+    {'name': 'Google spend on [Ampd] campaigns', 'kind': 'area', 'points': [(dt(d), ampd_spend[d]) for d in sorted(ampd_spend) if d <= '2026-09-01']},
+    {'name': 'Amazon revenue + Brand Referral Bonus (Ampd)', 'points': [(dt(d), float(ad[d]['rev']) + float(ad[d]['brb'])) for d in sorted(ad)]}],
+    markers=[(dt('2026-07-21'), '"amazon" keywords blocked'), (dt('2026-08-21'), 'block lifted'), (dt('2026-08-26'), 'audit executed')], title='Ampd lane daily')
 chart_web = line_area_chart([
-    {'name': 'Google spend, website campaigns', 'points': web_pts_spend, 'kind': 'area', 'color': POWDER},
-    {'name': 'Google-reported conversion value', 'points': web_pts_val, 'kind': 'line', 'color': NAVY},
-], markers=[(dt('2026-08-05'), 'Demand Gen live'), (dt('2026-08-26'), 'audit executed 08-26 · budgets raised 08-27')],
-   title='Website lane daily spend vs Google conversion value')
-
-pm = load('pixelme_daily')
-bk = {r['d']: r for r in pm if r['acct'].startswith('Thalestris')}
+    {'name': 'Google spend, website campaigns', 'kind': 'area', 'points': [(dt(d), float(r['spend'])) for d, r in sorted(web.items())]},
+    {'name': 'Google-reported conversion value', 'points': [(dt(d), float(r['conv_value'])) for d, r in sorted(web.items())]}],
+    markers=[(dt('2026-08-05'), 'Demand Gen live'), (dt('2026-08-26'), 'audit 08-26, budgets raised 08-27')], title='Website lane daily')
+bk = {r['d']: r for r in load('pixelme_daily') if r['acct'].startswith('Thalestris')}
 chart_bk = line_area_chart([
-    {'name': 'Google spend (PixelMe ad cost)', 'points': [(dt(d), float(r['cost'])) for d, r in sorted(bk.items())], 'kind': 'area', 'color': POWDER},
-    {'name': 'Amazon attributed revenue (PixelMe)', 'points': [(dt(d), float(r['rev'])) for d, r in sorted(bk.items())], 'kind': 'line', 'color': NAVY},
-], markers=[(dt('2026-08-05'), '26 non-brand campaigns built'), (dt('2026-08-24'), '8 paused + cloned')], title='Beckham Home daily spend vs PixelMe revenue')
+    {'name': 'Google spend (PixelMe ad cost)', 'kind': 'area', 'points': [(dt(d), float(r['cost'])) for d, r in sorted(bk.items())]},
+    {'name': 'Amazon revenue attributed by PixelMe', 'points': [(dt(d), float(r['rev'])) for d, r in sorted(bk.items())]}],
+    markers=[(dt('2026-08-05'), '26 non-brand campaigns launched'), (dt('2026-08-24'), '8 rebuilt')], title='Beckham Home daily')
 
-kw = load('kw_class_weekly')
-wks = sorted({r['wk'] for r in kw if r['wk'] <= '2026-08-24'})
-amz = {r['wk']: r for r in kw if r['is_amazon_keyword']}
-gen = {r['wk']: r for r in kw if not r['is_amazon_keyword']}
-chart_kw = bar_chart([datetime.date.fromisoformat(w).strftime('%b %d') for w in wks],
-    [{'name': 'generic keywords', 'color': POWDER, 'values': [float(gen[w]['cost']) if w in gen else 0 for w in wks]},
-     {'name': '"amazon" keywords', 'color': NAVY, 'values': [float(amz[w]['cost']) if w in amz else 0 for w in wks]}],
-    title='Weekly Ampd spend by keyword class')
-
-# ---------------------------------------------------------------- tables
-def table(headers, rows, cls='', aligns=None):
+def table(headers, rows, aligns=None, cls=''):
     aligns = aligns or ['l'] + ['r'] * (len(headers) - 1)
     h = ''.join(f'<th class="{a}">{t}</th>' for t, a in zip(headers, aligns))
-    body = ''
-    for r in rows:
-        body += '<tr>' + ''.join(f'<td class="{a}">{c}</td>' for c, a in zip(r, aligns)) + '</tr>'
-    return f'<table class="{cls}"><thead><tr>{h}</tr></thead><tbody>{body}</tbody></table>'
+    b = ''.join('<tr>' + ''.join(f'<td class="{a}">{c}</td>' for c, a in zip(r, aligns)) + '</tr>' for r in rows)
+    return f'<table class="{cls}"><thead><tr>{h}</tr></thead><tbody>{b}</tbody></table>'
+def tag(kind):
+    return f'<span class="tag {kind.lower()}">{kind}</span>'
 
-ampd_win = {  # from the Google-spend + Ampd-mirror window query (2026-09-03)
-    'P30': dict(spend=70463, rev=156117, brb=14513, conv=4494, aacos=0.347, cpc=1.21, cvr=0.079, ntb=0.73, cov=0.975),
-    'L30': dict(spend=50764, rev=115355, brb=10947, conv=3307, aacos=0.340, cpc=1.23, cvr=0.081, ntb=0.71, cov=0.988),
-    'STABLE': dict(spend=56009, rev=128686, brb=11548, conv=3618, aacos=0.345, cpc=1.23, cvr=0.080, ntb=0.72, cov=0.999),
-    'P14': dict(spend=23755, rev=56984, brb=5519, conv=1521, aacos=0.319, cpc=1.24, cvr=0.079, ntb=0.72, cov=0.998),
-    'L14': dict(spend=25036, rev=55011, brb=5043, conv=1689, aacos=0.353, cpc=1.23, cvr=0.084, ntb=0.72, cov=0.977),
-    'JUL': dict(spend=71807, rev=152037, brb=14222, conv=4429, aacos=0.355, cpc=1.21, cvr=0.077, ntb=0.73, cov=0.950),
-    'AUG': dict(spend=55906, rev=131248, brb=12683, conv=3705, aacos=0.324, cpc=1.23, cvr=0.082, ntb=0.72, cov=0.989),
-}
-win_labels = [('JUL', 'July 1–31'), ('AUG', 'August 1–31'), ('P30', 'Prior 30 (Jul 5–Aug 3)'), ('L30', 'Last 30 (Aug 4–Sep 1)'), ('STABLE', 'Stable 30 (Jul 21–Aug 19)'), ('P14', 'Prior 14 (Aug 5–18)'), ('L14', 'Last 14 (Aug 19–Sep 1)')]
-t_ampd_windows = table(['Window', 'Spend', 'Amazon revenue', 'BRB', 'Conv', 'CPC', 'CVR', 'AACOS', 'NTB share', 'Mirror cov.'],
-    [[lbl, money(w['spend']), money(w['rev']), money(w['brb']), num(w['conv']), money(w['cpc'], 2), pct(w['cvr']), f'<b>{pct(w["aacos"])}</b>', pct(w['ntb'], 0), pct(w['cov'])] for k, lbl in win_labels for w in [ampd_win[k]]])
+# Ampd windows (Google spend + Ampd mirror attribution, 2026-09-03 pull)
+W = {'JUL': dict(l='July', spend=71807, rev=152037, brb=14222, conv=4429, aacos=0.355),
+     'AUG': dict(l='August', spend=55906, rev=131248, brb=12683, conv=3705, aacos=0.324),
+     'P30': dict(l='Prior 30 (Jul 5–Aug 3)', spend=70463, rev=156117, brb=14513, conv=4494, aacos=0.347),
+     'L30': dict(l='Last 30 (Aug 4–Sep 1)', spend=50764, rev=115355, brb=10947, conv=3307, aacos=0.340),
+     'STABLE': dict(l='Stable 30 (Jul 21–Aug 19) — decision window', spend=56009, rev=128686, brb=11548, conv=3618, aacos=0.345),
+     'L14': dict(l='Last 14 (Aug 19–Sep 1) — still maturing', spend=25036, rev=55011, brb=5043, conv=1689, aacos=0.353)}
+t_ampd_windows = table(['Window', 'Spend', 'Amazon revenue', 'Bonus (BRB)', 'Orders', 'AACOS'],
+    [[w['l'], money(w['spend']), money(w['rev']), money(w['brb']), num(w['conv']), f'<b>{pct(w["aacos"], 1)}</b>'] for w in W.values()])
 
-kw_rows = []
-for w in wks + ['2026-08-31']:
-    a = amz.get(w); g = gen.get(w)
-    if not a or not g: continue
-    tot = float(a['cost']) + float(g['cost'])
-    kw_rows.append([datetime.date.fromisoformat(w).strftime('%b %d'), money(g['cost']), pct(g['aacos']), money(a['cost']), f'{float(a["cost"])/tot*100:.0f}%', num(a['kws_serving']), pct(a['aacos'])])
-t_kw = table(['Week of', 'Generic spend', 'Generic AACOS', '"amazon" spend', 'Share', '"amazon" kws', '"amazon" AACOS'], kw_rows, cls='dense')
+kw = load('kw_class_weekly'); amz = {r['wk']: r for r in kw if r['is_amazon_keyword']}; gen = {r['wk']: r for r in kw if not r['is_amazon_keyword']}
+t_kw = table(['Week of', '"amazon" keyword spend', 'Share of lane', 'Keywords serving', 'AACOS'],
+    [[dt(w).strftime('%b %d'), money(amz[w]['cost']), f'{float(amz[w]["cost"])/(float(amz[w]["cost"])+float(gen[w]["cost"]))*100:.0f}%', num(amz[w]['kws_serving']), pct(amz[w]['aacos'])] for w in ['2026-07-06', '2026-07-13', '2026-07-27', '2026-08-10', '2026-08-17', '2026-08-24']])
 
-ac = load('ampd_campaigns')
-def byid(win): return {r['campaign_id']: r for r in ac if r['win'] == win}
-st, l30, l14 = byid('STABLE'), byid('L30'), byid('L14')
-# renamed campaigns: patch with the mirror-by-name figures (view fixed after the pull)
-fix = {'23350268344': {'STABLE': (14666, 33188, 3130, 896, 0.348), 'L30': (11882, 26586, 2631, 748, 0.348), 'L14': (4098, 10793, 1060, 322, 0.281)},
-       '21839192355': {'STABLE': (1967, 4464, 0, 130, 0.441), 'L30': (1853, 4063, 0, 110, 0.456), 'L14': (798, 1780, 0, 46, 0.449)}}
-live_budget = {'23864624639': 250, '22821667433': 300, '23576925357': 100, '24139372252': 40, '22719773443': 24, '24139407325': 19, '23859376713': 30, '23451576927': 40}
-live_ceiling = {'23350268344': 2.5, '21496355417': 0.78, '21506111969': 1.65, '22377660684': 1.5, '22564129915': 2.0, '22574740272': 1.5, '22719773443': 0.71, '22801629102': 1.5, '22821667433': 0.65, '23451576927': 0.65, '23461114981': 0.6, '23462511087': 1.45, '23467639163': 1.25, '23472210370': 1.4, '23576925357': 1.0, '23576955786': 0.75, '23582317199': 0.75, '23758894201': 1.5, '23864624639': 1.25, '23864706143': 1.0, '24069391339': 0.5, '24128873457': 0.85, '24139372252': 0.7, '24139378924': 0.38, '24139407325': 0.8, '24176957259': 1.5, '24182840078': 0.3}
-manual_bid = {'19876543583': 2.25, '21083360054': 2.20, '21506125421': 3.15, '21510061819': 1.50, '21839192355': 0.98, '22452315321': 0.83, '23676906151': 1.13, '23754299480': 1.00, '23859376713': 1.00}
-short = lambda n: n.replace('[Ampd] ', '').replace('amazon.com ', '').replace('[AMPD] ', '')
+ac = load('ampd_campaigns'); st = {r['campaign_id']: r for r in ac if r['win'] == 'STABLE'}; l14 = {r['campaign_id']: r for r in ac if r['win'] == 'L14'}; l30 = {r['campaign_id']: r for r in ac if r['win'] == 'L30'}
+fix = {'23350268344': ((14666, 0.348), (11882, 0.348), (4098, 0.281)), '21839192355': ((1967, 0.441), (1853, 0.456), (798, 0.449))}
+names = {'23350268344': '6PC King Deep Pocket KWs', '23676906151': 'Bamboo Cooling Sheets', '21496355417': '4PC Queen White (legacy "|")', '21510061819': '4PC Queen White (Manual CPC)', '21083360054': 'Storefront Deep Pocket KWs', '23864624639': 'Summer Cooling Comforters', '23859376713': 'Fleece Blankets', '23451576927': 'Duvet Cover Storefront', '21839192355': 'Canada 6PC King', '23472210370': '6PC Extra Deep Pocket King', '23758894201': 'Dorm Bed Skirt 24 in', '23576925357': 'Full XL Sheets', '22452315321': '21 Inch 6PC Storefront', '22719773443': 'RV Short Queen', '22564129915': '4PC Main Storefront', '23754299480': 'Dorm Bed Skirt 15 in', '23461114981': 'Duvet Cover New', '23582317199': 'Flex Top Split Head', '24128873457': '4PC Queen Core KWs', '22801629102': 'Cooling Bed Sheets 4PC Queen', '23864706143': 'Bulk Sheets 4PC', '22377660684': '6PC King White', '23467639163': '6PC Extra Deep Pocket', '22574740272': 'Canada 4PC Top Performers', '19876543583': 'Light Grey 2 (amazon keywords)', '21506111969': '4PC Queen White July 2024', '22821667433': 'Bamboo Product Page', '24139407325': 'RV Short Queen Core KWs', '24176957259': 'Canada Light Grey (new 08-26)', '21736166343': 'Light Grey 4 (paused 08-26)'}
 verdict = {
-    '23350268344': 'Hold — largest campaign, at target; L14 improving',
-    '23676906151': 'Watch — bid-downs applied 08-26',
-    '21496355417': 'Hold at $138',
-    '21510061819': 'Bid down "queen sheet set" $1.25→$1.12',
-    '21083360054': 'Bid down "extra deep queen sheets" $2.39→$1.80',
-    '23864624639': 'Revert 08-31 budget $250→$100; seasonal trim',
-    '23859376713': 'Pause until Oct 1 (84% AACOS in every window)',
-    '23451576927': 'Hold — 08-26 fix working (78%→36%)',
-    '23472210370': 'Scale — ceiling $1.40→$1.65 (rank-limited)',
-    '23758894201': 'Hold — trim ceiling $1.50→$1.30 if L14 stays >40%',
-    '23576925357': 'Scale — ceiling $1.00→$1.25',
-    '22452315321': 'Scale — ad-group bid $0.83→$1.05',
-    '22719773443': 'Restore budget $24→$75, ceiling $0.71→$0.90',
-    '22564129915': 'Pause kw "king sheets deep pocket"; ceiling $2.00→$1.60',
-    '23754299480': 'Hold (dorm season ending)',
-    '23461114981': 'Ceiling $0.60→$0.50',
-    '23582317199': 'Scale — ceiling $0.75→$1.00',
-    '24128873457': 'Convert to Manual CPC; "king size sheets on sale" at $0.65',
-    '22801629102': 'Pause — 183% AACOS, duplicate of Bamboo Cooling coverage',
-    '23864706143': 'Scale — ceiling $1.00→$1.30',
-    '22377660684': 'Watch — amazon-class volume returned; judge 09-10',
-    '23467639163': 'Scale — ceiling $1.25→$1.55',
-    '22574740272': 'CA: ceiling $1.50→$1.20',
-    '23576955786': 'Hold',
-    '21736166343': 'Paused 08-26 (was never linked in Ampd)',
-    '23462511087': 'Hold',
-    '24069391339': 'Scale — ceiling $0.50→$0.70',
-    '21506111969': 'Hold',
-    '22821667433': 'Revert 08-31 budget $300→$30 (213% AACOS history)',
-    '24139407325': 'Scale — budget $19→$50, ceiling $0.80→$1.00',
-    '19876543583': 'Hold — +25% amazon-class raise on 08-26; judge 09-10',
-    '21506125421': 'Watch (MANUAL $3.15 bid, 46% on tiny spend)',
-    '24139372252': 'Hold',
-    '21839192355': 'CA: "king sheets" bid $0.98→$0.80',
-    '24176957259': 'Watch — 8 days old',
-    '24182840078': 'Hold — ceiling $0.30 is the breakeven; low volume expected',
-    '24139378924': 'Hold',
+    '23350268344': ('Keep', 'largest campaign, on target, improving'),
+    '23676906151': ('Watch', 'bid cuts landed 08-26; judge 09-17'),
+    '21496355417': ('Keep', 'hold at $138/d'),
+    '21510061819': ('Fix', '"queen sheet set" bid $1.25 → $1.12'),
+    '21083360054': ('Fix', '"extra deep queen sheets" bid $2.39 → $1.80'),
+    '23864624639': ('Fix', 'revert 08-31 budget $250 → $100'),
+    '23859376713': ('Cut', 'pause until Oct 1'),
+    '23451576927': ('Keep', '08-26 fix working: 78% → 36%'),
+    '21839192355': ('Fix', '"king sheets" bid $0.98 → $0.80 (CA target ≈40%)'),
+    '23472210370': ('Scale', 'ceiling $1.40 → $1.65'),
+    '23758894201': ('Keep', 'trim ceiling if L14 stays above 40%'),
+    '23576925357': ('Scale', 'ceiling $1.00 → $1.25'),
+    '22452315321': ('Scale', 'bid $0.83 → $1.05'),
+    '22719773443': ('Scale', 'budget $24 → $75, ceiling $0.71 → $0.90'),
+    '22564129915': ('Fix', 'pause "king sheets deep pocket"; ceiling $2.00 → $1.60'),
+    '23754299480': ('Keep', 'dorm season ending'),
+    '23461114981': ('Fix', 'ceiling $0.60 → $0.50'),
+    '23582317199': ('Scale', 'ceiling $0.75 → $1.00'),
+    '24128873457': ('Fix', 'switch to Manual CPC; bid the hog at $0.65'),
+    '22801629102': ('Cut', 'pause — 183% AACOS, duplicates Bamboo Cooling'),
+    '23864706143': ('Scale', 'ceiling $1.00 → $1.30'),
+    '22377660684': ('Watch', 'amazon-keyword volume returned; judge 09-10'),
+    '23467639163': ('Scale', 'ceiling $1.25 → $1.55'),
+    '22574740272': ('Fix', 'ceiling $1.50 → $1.20'),
 }
 rows = []
-order = sorted(set(list(st) + list(l30)), key=lambda cid: -(float((l30.get(cid) or {}).get('cost') or 0) + float((st.get(cid) or {}).get('cost') or 0)))
-seen = set()
-for cid in order:
-    if cid in seen: continue
-    seen.add(cid)
-    r = l30.get(cid) or st.get(cid) or l14.get(cid)
-    name = short(r['campaign_name'])
-    if cid in fix:
-        name = short({'23350268344': '[Ampd] 21 In 6PC | King | White | B07F91D1Z3 | DEEP POCKET KWs | US', '21839192355': '[Ampd] 21 Inch 6PC CANADA | King | White | B0C59FZZ29 | Deep Pocket KWs'}[cid])
-    def cell(win_rows, w):
-        if cid in fix:
-            c, rv, b, cv, aa = fix[cid][w]
-            return money(c), pct(aa)
-        rr = win_rows.get(cid)
-        if not rr: return '—', '—'
-        return money(rr['cost']), pct(rr['aacos']) if rr.get('aacos') is not None else '—'
-    s_c, s_a = cell(st, 'STABLE'); l_c, l_a = cell(l30, 'L30'); f_c, f_a = cell(l14, 'L14')
-    strat = (r.get('strategy') or '').replace('TARGET_SPEND', 'Max Clicks').replace('MANUAL_CPC', 'Manual CPC')
-    lever = f'ceiling {money(live_ceiling[cid],2)}' if cid in live_ceiling else (f'bid {money(manual_bid[cid],2)}' if cid in manual_bid else '')
-    bud = live_budget.get(cid, r.get('budget'))
-    def mv(t):
-        t = t.replace('$', '').replace(',', '')
-        return float(t) if t not in ('', '—') else 0.0
-    if mv(l_c) < 40 and cid not in fix and mv(s_c) < 60: continue
-    rows.append([f'{name}<br><span class="id">{cid} · {strat} · budget {money(bud)}/d · {lever}</span>', s_c, s_a, l_c, l_a, f_c, f_a, verdict.get(cid, '')])
-t_ampd_campaigns = table(['Campaign', 'Stable spend', 'Stable AACOS', 'L30 spend', 'L30 AACOS', 'L14 spend', 'L14 AACOS<br><span class="id">immature</span>', 'Recommendation'], rows, cls='dense', aligns=['l', 'r', 'r', 'r', 'r', 'r', 'r', 'l'])
+for cid, r in sorted(st.items(), key=lambda kv: -float(kv[1]['cost'])):
+    if float(r['cost']) < 150: continue
+    if cid in fix: sc, sa = fix[cid][0]; fc, fa = fix[cid][2]
+    else:
+        sc, sa = float(r['cost']), r.get('aacos'); f = l14.get(cid); fc, fa = (float(f['cost']), f.get('aacos')) if f else (None, None)
+    v = verdict.get(cid, ('Keep', ''))
+    rows.append([f'{names.get(cid, r["campaign_name"][:40])}<br><span class="id">{cid}</span>', money(sc), pct(sa) if sa is not None else '—', pct(fa) if fa is not None else '—', tag(v[0]) + ' ' + v[1]])
+t_ampd_campaigns = table(['Campaign', 'Stable spend', 'Stable AACOS', 'Last-14 AACOS<br><span class="id">maturing</span>', 'Verdict'], rows, aligns=['l', 'r', 'r', 'r', 'l'], cls='verdicts v5')
 
-wc = load('website_campaigns')
-w30 = {r['campaign_id']: r for r in wc if r['win'] == 'L30'}
-wp30 = {r['campaign_id']: r for r in wc if r['win'] == 'P30'}
-w14 = {r['campaign_id']: r for r in wc if r['win'] == 'L14'}
-l7 = {  # 08-27..09-02 post domain-fix pull (spend, google value, nb 7d rev)
-    '22166226679': (1087, 1091, 741), '23836235206': (1003, 1198, 1313), '22440426630': (952, 1333, 1522), '21696634733': (858, 1169, 958), '23963684825': (760, 869, 815), '23769689251': (743, 728, 822), '23788030482': (727, 659, 428), '23747211118': (604, 1041, 1130), '23749922783': (419, 813, 806), '19342888496': (405, 115, 76), '24177022254': (359, 194, 201), '23742603974': (300, 360, 360), '13622723707': (299, 3070, 1014), '23775728849': (105, 110, 124), '23775627497': (92, 61, 160), '23808252605': (59, 0, 14), '23770477647': (53, 52, 70), '23769662365': (43, 29, 36)}
-live_web = {  # live 2026-09-03: budget, tROAS/tCPA
-    '13622723707': (150, 'tROAS 10'), '19342888496': (75, 'tROAS 1.5'), '21696634733': (150, 'tROAS 1.6'), '22166226679': (190, 'tROAS 2.0'), '22440426630': (150, 'tROAS 2.0'), '23742603974': (200, 'tROAS 2.3'), '23747211118': (160, 'tROAS 2.1'), '23749922783': (150, 'tROAS 2.4'), '23769662365': (150, 'tROAS 2.5'), '23769689251': (400, 'tROAS 2.0'), '23770477647': (250, 'tROAS 3.5'), '23775627497': (150, 'tROAS 2.5'), '23775728849': (150, 'tROAS 2.0'), '23788030482': (125, 'tCPA $60'), '23808252605': (50, 'tROAS 2.0'), '23836235206': (150, 'tROAS 1.5'), '23963684825': (100, 'tROAS 2.0'), '24177022254': (50, 'Manual CPC')}
-web_verdict = {
-    '23788030482': 'Pause (0.65 Google / 0.52 NB on $12.2k); if kept, cap $50/d and judge NB ≥1.0 by 09-17',
-    '23836235206': 'Hold tROAS 1.5 to 09-10; ratchet to 1.65 only if L14 ≥1.4',
-    '22166226679': 'Below target since raise; revert $190→$100 if L14 <1.6 on 09-10',
-    '22440426630': 'Hold at $150',
-    '19342888496': 'Anomaly: value collapsed from 08-19; raise tROAS 1.5→1.8, check conversion-action mix',
-    '21696634733': 'Hold at $150',
-    '13622723707': 'Add exact misspelling keywords; lower tROAS 10→6',
-    '23747211118': 'Hold — raise to $160 is working (2.0 both sources)',
-    '23963684825': 'Raise to $100 diluted it (2.08→1.14); revert to $70 if L14 <1.6',
-    '23769689251': 'Raise to $400 diluted it (1.73→0.98); revert to $150 if L14 <1.6',
-    '23749922783': 'Lower tROAS 2.4→2.1 to unlock volume (rank-limited at 2.3–2.5)',
-    '23742603974': 'Hold (NB says 1.6; Google 1.1)',
-    '23775627497': 'Hold',
-    '24177022254': 'Keep to 09-17; bids/QS losing 87% of auctions; prune ad groups with $50 and 0 conv',
-    '23775728849': 'Hold',
-    '23808252605': 'Pause (1 conv on $119)',
-    '23769662365': 'Hold (tROAS-governed, small)',
-    '23770477647': 'Hold (small)',
+wc = load('website_campaigns'); w30 = {r['campaign_id']: r for r in wc if r['win'] == 'L30'}
+l7 = {'22166226679': (1087, 1091, 741), '23836235206': (1003, 1198, 1313), '22440426630': (952, 1333, 1522), '21696634733': (858, 1169, 958), '23963684825': (760, 869, 815), '23769689251': (743, 728, 822), '23788030482': (727, 659, 428), '23747211118': (604, 1041, 1130), '23749922783': (419, 813, 806), '19342888496': (405, 115, 76), '24177022254': (359, 194, 201), '23742603974': (300, 360, 360), '13622723707': (299, 3070, 1014), '23775728849': (105, 110, 124), '23775627497': (92, 61, 160)}
+live_web = {'13622723707': '$150 · tROAS 10', '19342888496': '$75 · tROAS 1.5', '21696634733': '$150 · tROAS 1.6', '22166226679': '$190 · tROAS 2.0', '22440426630': '$150 · tROAS 2.0', '23742603974': '$200 · tROAS 2.3', '23747211118': '$160 · tROAS 2.1', '23749922783': '$150 · tROAS 2.4', '23769689251': '$400 · tROAS 2.0', '23775627497': '$150 · tROAS 2.5', '23775728849': '$150 · tROAS 2.0', '23788030482': '$125 · tCPA $60', '23836235206': '$150 · tROAS 1.5', '23963684825': '$100 · tROAS 2.0', '24177022254': '$50 · Manual CPC'}
+wnames = {'23788030482': 'Demand Gen / YouTube', '23836235206': 'PMax Deep Sheets + Bedskirt', '22166226679': '21 In 4PC Shopping', '22440426630': 'Queen 4PC Shopping, brand only', '19342888496': '6PC All Shopping', '21696634733': 'Queen 4PC Shopping, brand excluded', '13622723707': 'Brand search', '23747211118': 'Bed Skirts Shopping', '23963684825': 'Split King White Shopping', '23769689251': 'Pillowcases Shopping', '23749922783': 'Comforters Shopping', '23742603974': 'Bamboo Shopping', '23775627497': 'Single Flat Shopping', '24177022254': 'Harvest exact search (new 08-26)', '23775728849': 'Duvet Cover Shopping'}
+wverdict = {
+    '23788030482': ('Cut', 'pause; 0.65x Google / 0.52x Northbeam'),
+    '23836235206': ('Watch', 'hold tROAS 1.5 to 09-10'),
+    '22166226679': ('Watch', 'revert $190 → $100 if still under 1.6x on 09-10'),
+    '22440426630': ('Keep', ''),
+    '19342888496': ('Fix', 'value collapsed since 08-19; tROAS 1.5 → 1.8, check conversion actions'),
+    '21696634733': ('Keep', ''),
+    '13622723707': ('Scale', 'add misspelling keywords; tROAS 10 → 6'),
+    '23747211118': ('Keep', 'the raise to $160 is working'),
+    '23963684825': ('Watch', 'revert $100 → $70 if still under 1.6x on 09-10'),
+    '23769689251': ('Watch', 'revert $400 → $150 if still under 1.6x on 09-10'),
+    '23749922783': ('Scale', 'tROAS 2.4 → 2.1 to unlock volume'),
+    '23742603974': ('Keep', ''),
+    '23775627497': ('Keep', ''),
+    '24177022254': ('Watch', 'losing 87% of auctions on rank; keep to 09-17'),
+    '23775728849': ('Keep', ''),
 }
 rows = []
 for cid, r in sorted(w30.items(), key=lambda kv: -float(kv[1]['spend'])):
-    p = wp30.get(cid); f = w14.get(cid); s7 = l7.get(cid)
-    lb = live_web.get(cid, (r.get('budget'), ''))
-    name = r['campaign_name'].replace('Deep Pocket Sheet Best Ad | Shopify |  Deep Pocket | Stretch+Fit 4K V4 | Demand Gen / Youtube', 'Demand Gen / YouTube — Deep Pocket Stretch+Fit')
-    rows.append([f'{name}<br><span class="id">{cid} · {r["ch"].replace("_"," ").title()} · budget {money(lb[0])}/d · {lb[1]}</span>',
-                 money(p['spend']) if p else '—', x(p['roas']) if p else '—',
-                 money(r['spend']), x(r['roas']), x(r['nb_roas7']) if r.get('nb_roas7') is not None else '—',
-                 money(s7[0]) if s7 else '—', x(s7[1] / s7[0]) if s7 else '—', x(s7[2] / s7[0]) if s7 else '—',
-                 web_verdict.get(cid, '')])
-t_web = table(['Campaign', 'P30 spend', 'P30 Google ROAS', 'L30 spend', 'L30 Google ROAS', 'L30 NB 7d ROAS', 'L7 spend<br><span class="id">Aug 27–Sep 2</span>', 'L7 Google', 'L7 NB 7d', 'Recommendation'], rows, cls='dense', aligns=['l'] + ['r'] * 8 + ['l'])
+    if float(r['spend']) < 250: continue
+    s7 = l7.get(cid); v = wverdict.get(cid, ('Keep', ''))
+    rows.append([f'{wnames.get(cid, r["campaign_name"][:40])}<br><span class="id">{cid} · {live_web.get(cid, "")}</span>', money(r['spend']), x(r['roas']), x(r['nb_roas7']) if r.get('nb_roas7') is not None else '—', x(s7[1]/s7[0]) if s7 else '—', x(s7[2]/s7[0]) if s7 else '—', tag(v[0]) + ' ' + v[1]])
+t_web = table(['Campaign<br><span class="id">id · daily budget · target</span>', 'L30 spend', 'L30 Google', 'L30 Northbeam', 'L7 Google', 'L7 Northbeam', 'Verdict'], rows, aligns=['l', 'r', 'r', 'r', 'r', 'r', 'l'], cls='verdicts v7')
 
-bc = load('beckham_campaigns'); bp = load('beckham_pixelme_products')
-b30 = [r for r in bc if r['win'] == 'L30']; b14 = {r['campaign_id']: r for r in bc if r['win'] == 'L14'}
-bp30 = {r['asin']: r for r in bp if r['win'] == 'L30'}; bp14 = {r['asin']: r for r in bp if r['win'] == 'P14'}; bpl14 = {r['asin']: r for r in bp if r['win'] == 'L14'}
+bp = load('beckham_pixelme_products'); bp30 = {r['asin']: r for r in bp if r['win'] == 'L30'}; bp14 = {r['asin']: r for r in bp if r['win'] == 'P14'}; bl14 = {r['asin']: r for r in bp if r['win'] == 'L14'}
 SF = next(k for k in bp30 if k.startswith('aHR0'))
-bk_names = {SF: 'Becky Cameron pillow storefront (both storefront campaigns)', 'B01LYNW421': 'Down Alternative bed pillows', 'B0D9WXQVJS': 'Pillow protectors, queen', 'B0F2TQM32J': 'Cooling pillowcases', 'B0BGTNFCN3': 'Shredded memory foam pillow'}
-rows = []
-for asin in [SF, 'B01LYNW421', 'B0D9WXQVJS', 'B0F2TQM32J', 'B0BGTNFCN3']:
-    r = bp30[asin]; p = bp14.get(asin); f = bpl14.get(asin)
-    rows.append([bk_names[asin] + (f'<br><span class="id">{asin}</span>' if not asin.startswith('aHR0') else ''), money(r['ad_cost']), money(r['rev']), num(r['purchases']), x(r['roas']), pct(r['acos']) if r.get('acos') else '—', x(p['roas']) if p else '—', x(f['roas']) if f else '—'])
-t_bk_products = table(['Product (PixelMe attribution)', 'L30 spend', 'L30 Amazon revenue', 'Purchases', 'L30 ROAS', 'L30 ACOS', 'P14 ROAS', 'L14 ROAS'], rows)
-bk_verdict = {
-    '21144235438': 'Hold budget; ROAS 3.28→2.62 as spend rose — do not add budget; floor 2.5',
-    '21140769962': 'Hold (tROAS 3.6, IS 91%)',
-    '24108461696': 'Cut $150→$50; negatives silk/satin',
-    '24102806289': 'Scale $150→$225 (3.37 L14 ROAS, 36% budget-lost)',
-    '24108462704': 'Cut $150→$40; negatives silk/blissy/satin',
-    '24108462695': 'Paused 08-24 (broken PixelMe URL)',
-    '24108462671': 'Paused 08-24',
-    '24113472868': 'Paused 08-24',
-    '24169545333': 'Pause — clone imports as -50, bids blind',
-    '23969931558': 'Pause (0.06 ROAS L30)',
-    '24169545984': 'Pause — clone imports as -50, bids blind',
-    '24175484375': 'Pause — clone imports as -50, bids blind',
-}
-rows = []
-for r in sorted(b30, key=lambda r: -float(r['spend'])):
-    f = b14.get(r['campaign_id'])
-    pm_s = {4: 'linked', 1: 'paused in PixelMe', -50: 'import failed (-50)', -5: 'pending'}.get(r.get('pm_status'), '—')
-    nm = r['campaign_name'].replace('[Pixelme] | Search | Amazon | Non Brand | ', '').replace('[Pixelme] - Becky Cameron - ', '')
-    rows.append([f'{nm}<br><span class="id">{r["campaign_id"]} · {r["status"]} · {(r["strat"] or "").replace("_"," ").title()} · budget {money(r["budget"])}/d · PixelMe: {pm_s}</span>',
-                 money(r['spend']), num(r['conv']), money(r['cpa'], 0) if r.get('cpa') else '—', money(f['spend']) if f else '—', num(f['conv']) if f else '—', bk_verdict.get(r['campaign_id'], '')])
-t_bk = table(['Campaign', 'L30 spend', 'L30 Google conv<br><span class="id">PixelMe upload</span>', 'Google CPA', 'L14 spend', 'L14 conv', 'Recommendation'], rows, cls='dense', aligns=['l', 'r', 'r', 'r', 'r', 'r', 'l'])
+bk_rows = []
+for asin, nm, v in [(SF, 'Pillow storefront (both storefront campaigns)', ('Keep', 'returns falling as spend rises: 3.28x → 2.62x; do not add budget')), ('B01LYNW421', 'Down Alternative pillows', ('Scale', 'the one non-brand winner; rebuilt in PixelMe today')), ('B0D9WXQVJS', 'Pillow protectors', ('Cut', 'rebuilt today at $150; recommend $50 + silk/satin negatives')), ('B0F2TQM32J', 'Cooling pillowcases', ('Cut', 'rebuilt today at $150; recommend $40 + silk/blissy/satin negatives')), ('B0BGTNFCN3', 'Shredded memory foam pillow', ('Cut', 'pause campaign 23969931558'))]:
+    r = bp30[asin]; p = bp14.get(asin); f = bl14.get(asin)
+    bk_rows.append([nm, money(r['ad_cost']), money(r['rev']), x(r['roas']), x(p['roas']) if p else '—', x(f['roas']) if f else '—', tag(v[0]) + ' ' + v[1]])
+t_bk = table(['Product (PixelMe attribution)', 'L30 spend', 'Amazon revenue', 'L30 ROAS', 'Prior-14 ROAS', 'L14 ROAS', 'Verdict'], bk_rows, aligns=['l', 'r', 'r', 'r', 'r', 'r', 'l'], cls='verdicts bk')
 
-sc = load('saferest_campaigns'); sp = load('saferest_pixelme_products')
-s30 = [r for r in sc if r['win'] == 'L30']; sP30 = {r['campaign_id']: r for r in sc if r['win'] == 'P30'}
-rows = []
-for r in sorted(s30, key=lambda r: -float(r['spend'])):
-    p = sP30.get(r['campaign_id'])
-    nm = r['campaign_name'].replace('[Pixelme] - SafeRest - ', '')
-    rows.append([f'{nm}<br><span class="id">{r["campaign_id"]} · Max Conv Value · budget {money(r["budget"])}/d</span>', money(p['spend']) if p else '—', money(r['spend']), num(r['conv']), money(r['conv_value']), x(float(r['conv_value']) / float(r['spend'])), money(r['cpa'], 2)])
-t_sr = table(['Campaign', 'P30 spend', 'L30 spend', 'L30 Google conv', 'L30 Google value', 'Google ROAS', 'CPA'], rows, cls='dense')
-rows = []
-for w in ['P30', 'STABLE', 'L30', 'L14']:
-    for r in [r for r in sp if r['win'] == w]:
-        rows.append([{'P30': 'Prior 30', 'STABLE': 'Stable 30', 'L30': 'Last 30', 'L14': 'Last 14'}[w] + ' · ' + ('King protector B003PWK2A8' if r['asin'] == 'B003PWK2A8' else 'Queen protector B003PWNH4Q'), money(r['ad_cost']), money(r['rev']), num(r['purchases']), x(r['roas']), pct(r['acos'])])
-t_sr_pm = table(['Window · product (PixelMe)', 'Spend', 'Amazon revenue', 'Purchases', 'ROAS', 'ACOS'], rows, cls='dense')
+sr = load('saferest_pixelme_products'); sr30 = {r['asin']: r for r in sr if r['win'] == 'L30'}; srp = {r['asin']: r for r in sr if r['win'] == 'P30'}
+t_sr = table(['Product (PixelMe attribution)', 'Prior-30 ROAS', 'Last-30 spend', 'Amazon revenue', 'Last-30 ROAS', 'ACOS'],
+    [[nm, x(srp[a]['roas']), money(sr30[a]['ad_cost']), money(sr30[a]['rev']), x(sr30[a]['roas']), pct(sr30[a]['acos'])] for a, nm in [('B003PWK2A8', 'King mattress protector'), ('B003PWNH4Q', 'Queen mattress protector')]])
 
-# change log rows (curated from google_change_events, ampd.change_log, session records)
-changelog = [
-    ('08-05', 'Beckham Home', 'Nova (gads)', '26 non-brand [Pixelme] campaigns built at $150/day (Max Conversions, ad groups paused); 1,447 keyword criteria, 126 ads, 116 assets', 'google_change_events'),
-    ('08-05/06', 'Beckham Home', 'Thrasio (mark.hoban@)', '78 ad edits; one campaign REMOVED', 'google_change_events'),
-    ('08-06', 'Beckham Home', 'Holden', 'Storefront Pillows: Max Conversions target CPA set', 'google_change_events'),
-    ('08-06', 'CGK', 'Ampd (adwords-manager@metricstory)', 'Flex Top Split Head budget $100→$200; one Max CPC ceiling and one enhanced-CPC flag changed', 'google_change_events + ampd.change_log'),
-    ('08-06', 'CGK', 'Nova', 'Audit #1 delivered (PDF); Ampd warehouse coverage fix (campaign_daily_complete)', 'session record'),
-    ('08-13', 'CGK', 'Nova (Ampd wizard + gads)', 'Amazon-class block diagnosed as Google-side; 4 "Core KWs | US" campaigns created via Ampd (4PC Queen White $117, Full XL $13, RV Short Queen $19, Duvet $36); 126 keyword moves', 'google_change_events'),
-    ('08-13/14', 'CGK', 'Nova', 'Budget cuts: 4PC Queen White "|" $400→$138, RV Short Queen $500→$24, Full XL $250→$20; two Max CPC ceilings lowered', 'google_change_events'),
-    ('08-13', 'Beckham Home', 'Holden', '105 keyword edits across the new non-brand campaigns', 'google_change_events'),
-    ('08-18→08-31', 'CGK', 'Flood Media (josh@floodmedia.co)', '45 assets uploaded; ad groups on "BRAND [Website] CGK LINS #2" (24081965922) paused/edited; ad-group tROAS 2.25→2.0 on 08-31', 'google_change_events'),
-    ('08-20/21', 'CGK', 'Google', '~1.5-day account-wide serving stoppage (both lanes); self-resolved', 'warehouse'),
-    ('08-21', 'CGK', 'Google', '"amazon" keyword class resumed serving after 31 dark days', 'ampd.keyword_daily'),
-    ('08-24', 'CGK', 'Nova', 'Audit #2 "Ampd vs Website" (artifact); ranked action list', 'session record'),
-    ('08-24', 'Beckham Home', 'Nova', '8 campaigns with un-rewritten URLs paused and cloned as "8-24-26"; clones linked in PixelMe (import now fails -50/-51 vendor-side); Holden set storefront tCPA $26', 'google_change_events'),
-    ('08-26', 'CGK', 'Nova (24 gads plans, 270 ops)', 'Audit #2 executed with 5 owner overrides: Fleece→Manual CPC $30/d; Summer Comforters kept $100 + "queen summer comforter" paused/negated; Bamboo Product Page $300→$30 + ceiling $0.85→$0.65; Full XL legacy $20→$100 + ceiling $1.00; Full XL Core $13→$40; Duvet Storefront $75→$40 + "duvet cover set" isolated into 24182840078 ($50, ceiling $0.30); Light Grey 4 paused, replaced by amazon.ca 24176957259; 6PC King renamed "DEEP POCKET KWs | US"; Canada [AMPD]→[Ampd]; bid raises on Storefront DP KWs (+10/15/25%), 21 Inch 6Pc ($0.83), Light Grey 2 amazon class (+25%); DG $450→$125; Brand-Only Shopping $75→$115; SK White $30→$55; Bed Skirts tROAS 2.5→2.1; PMax tROAS 1.5; harvest campaign 24177022254 ($50/d); shared negative list 12207495603 on 16 website campaigns; 33 exact negatives on 21 In 4PC Shopping', 'google_change_events + ampd.change_log'),
-    ('08-26', 'CGK', 'Nova', 'Northbeam: cgk.com added as managed domain (Google website attribution valid from 08-27)', 'session record'),
-    ('08-27', 'CGK', 'Holden', 'Website budgets raised: Pillowcases $75→$400, 21 In 4PC Shopping $75→$190, Bed Skirts $100→$160, Queen 4PC Brand Excl $75→$150, Brand-Only $115→$150, SK White $55→$100; Demand Gen switched to Target CPA $60', 'google_change_events'),
-    ('08-31 04:10 ET', 'CGK', 'via Ampd (adwords-manager@metricstory)', 'Summer Comforters budget $100→$250 and Max CPC $1.00→$1.20→$1.25; Bamboo Product Page (22821667433) budget $30→$100→$300 — reversing the 08-26 cut; one further ceiling $1.00→$1.50. <b>Actor not identified</b> (a person in the Ampd UI or Ampd automation)', 'google_change_events + ampd.change_log'),
-    ('09-03', 'CGK', 'Nova', 'Warehouse: ampd.google_lane_daily now maps renamed campaigns (23350268344, 21839192355 no longer read as unattributed); Google change-event + recommendation feeds re-synced (were stale since 08-21/08-24)', 'this session'),
+decisions = [
+    ('Ampd automation', 'On Aug 31 at 4 am ET something acting through Ampd raised Summer Comforters to $250/day and Bamboo Product Page to $300/day, undoing the Aug 26 cuts. Did anyone on the team do that in Ampd? If not, an Ampd automation is switched on and needs switching off.', 'Confirm, then I revert both budgets'),
+    ('Demand Gen / YouTube', '$12.2k spent in the last 30 days at 0.65x Google / 0.52x Northbeam. Still 0.91x / 0.59x after the Aug 27 change to $125/day.', 'Pause, or keep as a $50/day test'),
+    ('Aug 27 website budget raises', 'Pillowcases ($75 → $400), 21 In 4PC ($75 → $190) and Split King White ($55 → $100) all fell to about 1.0x in their first week at the new budgets.', 'Agree to a revert rule: back to $150 / $100 / $70 if still under 1.6x on Sep 10'),
+    ('Flood Media access', 'josh@floodmedia.co has been editing the CGK account since Aug 18 (45 assets, the "BRAND #2" campaign, an ad-group tROAS). After the July compromise every external login should be deliberate.', 'Confirm it is intended'),
+    ('Beckham budgets', 'The three campaigns rebuilt in PixelMe today are at $150/day like the ones they replace. Pillow Protectors (0.49x) and Cooling Pillowcases (0.28x) lose money at that level.', 'OK to cut them to $50 / $40 and add the negatives'),
+    ('Google ticket', 'The "amazon" keywords have served normally since Aug 21, including the four that were still dark on Aug 24.', 'Close the ticket as resolved'),
 ]
-t_changelog = table(['Date', 'Account', 'Actor', 'Change', 'Evidence'], [[a, b, c, d, e] for a, b, c, d, e in changelog], cls='dense', aligns=['l', 'l', 'l', 'l', 'l'])
+t_decisions = table(['Topic', 'What the data says', 'What I need from you'], [[f'<b>{a}</b>', b, c] for a, b, c in decisions], aligns=['l', 'l', 'l'], cls='decide')
 
-analysis_log = [
-    ('2026-08-06', 'CGK Google Ads & Ampd Performance Review (PDF, 11 pp)', 'Jul-2 account compromise ($9,516, 82 MEC campaigns); amazon-class keywords dark since 07-21; 23/31 Ampd campaigns on Maximize Clicks; $3.7k July spend unattributed; AACOS definition + mirror-coverage traps fixed', '~/Downloads/CGK-Google-Ads-Ampd-Review-2026-08-06.pdf'),
-    ('2026-08-13', 'Amazon-class block diagnosis + keyword-split runbook', 'Block is Google-side and CGK-specific (SafeRest unaffected); appeal drafted for Holden; do not raise bids to compensate', '~/Downloads/google-ads-appeal-amazon-keywords.md · <hermes-state-dir>/state/ampd/keyword-split-20260813-runbook.md'),
-    ('2026-08-24', 'Ampd vs Website audit (artifact)', 'Two-lane audit, 18 confirmed findings; DG at 0.62 ROAS; bleeders (Fleece 90%, Duvet 72%); scale list; 21736166343 never linked', 'claude.ai/code/artifact/3341ca90-0d95-42cb-b809-aed4e6e880a3'),
-    ('2026-08-26', 'Audit execution', '24 mutation plans / 270 operations live; 5 owner overrides; new campaigns 24182840078, 24176957259, 24177022254', 'Slack recaps per plan; memory project-cgk-gads-audit-execution-20260826'),
-    ('2026-09-03', 'Weekly review #1 (this document)', 'First run of the weekly format across CGK Ampd, CGK website (with Northbeam), Beckham Home, SafeRest', 'this file'),
+ready = [
+    ('CGK Ampd', 'Pause Fleece Blankets (23859376713) until Oct 1 — 84% AACOS in every window.'),
+    ('CGK Ampd', 'Pause Cooling Bed Sheets 4PC Queen (22801629102) — 183% AACOS; Bamboo Cooling already covers the terms.'),
+    ('CGK Ampd', 'Bid down two hogs: "extra deep queen sheets" $2.39 → $1.80 in Storefront Deep Pocket KWs; "queen sheet set" $1.25 → $1.12 in 4PC Queen White.'),
+    ('CGK Ampd', 'Convert 4PC Queen Core KWs (24128873457) to Manual CPC and bid "king size sheets on sale" at $0.65.'),
+    ('CGK Ampd', 'Pause "king sheets deep pocket" in 4PC Main Storefront and lower its ceiling $2.00 → $1.60.'),
+    ('CGK Ampd', 'Scale nine rank-limited campaigns at 3–25% AACOS by raising their ceilings or bids 15–35% (table in §1) and restoring RV Short Queen budgets.'),
+    ('CGK Ampd', 'Canada: "king sheets" bid $0.98 → $0.80; 4PC Top Performers ceiling $1.50 → $1.20.'),
+    ('CGK website', '6PC All Shopping: tROAS 1.5 → 1.8 and check its conversion actions (orders continue, value ≈ $0 since Aug 19).'),
+    ('CGK website', 'Brand search: add exact keywords for the misspellings leaking into Shopping (ckg sheets, cjk linens, cgklinens…); lower tROAS 10 → 6.'),
+    ('CGK website', 'Comforters Shopping: tROAS 2.4 → 2.1 (rank-limited at 2.3–2.5x).'),
+    ('CGK website', 'Pause Striped Sheets Shopping (1 order on $119).'),
+    ('CGK website', 'Accept Google\'s creative-only recommendations on [Ampd] campaigns (133 RSA improvements, 130 sitelinks); reject every bidding opt-in, marginal-ROI budget raise, broad match, search partners and display expansion.'),
+    ('Beckham', 'Pause Adjustable Foam Pillows (23969931558) — 0.06x.'),
+    ('Beckham', 'Raise Down Alternative Amazon KW (24102806289) $250 → $300 if the new PixelMe campaign confirms the 3.4x last-14 read by Sep 17.'),
+    ('SafeRest', 'Lower tROAS 3.0 → 2.6 on both protector campaigns (Amazon truth 3.1x, 79–86% of auctions lost on rank).'),
 ]
-t_analysis_log = table(['Date', 'Analysis', 'Headline findings', 'Where'], [list(r) for r in analysis_log], cls='dense', aligns=['l', 'l', 'l', 'l'])
+t_ready = table(['Lane', 'Action'], [[a, b] for a, b in ready], aligns=['l', 'l'], cls='ready')
 
-actions = [
-    # (rank, lane, campaign, action, where, effect, judge)
-    (1, 'CGK Ampd', 'Summer Comforters 23864624639; Bamboo Product Page 22821667433', 'Confirm who made the 08-31 changes through Ampd. If nobody on the team did: revert Summer $250→$100 (ceiling $1.25→$1.00) and Bamboo PP $300→$30, and find/disable the Ampd automation that did it', 'Ampd UI (budget/ceiling) — gads is also safe for these', 'Stops ~$150/d of re-opened spend at 42–213% AACOS', 'now'),
-    (2, 'CGK Website', 'Demand Gen / YouTube 23788030482', 'Pause. 0.65 Google / 0.52 Northbeam on $12.2k L30; still 0.91 / 0.59 after the $125 + tCPA $60 change', 'gads plan-mutation --status PAUSED', '≈ −$1,500 to −$1,900/mo net loss removed', 'owner call'),
-    (3, 'CGK Ampd', 'Fleece Blankets 23859376713', 'Pause until Oct 1 (84–85% AACOS in every window; "throw blankets" 344%)', 'gads or Ampd UI', '≈ $950/mo over target-justified cost', 'now'),
-    (4, 'CGK Ampd', 'Cooling Bed Sheets 4PC Queen 22801629102', 'Pause (183% L30, 189% L14; Bamboo Cooling already covers cooling terms at 30–38%)', 'gads or Ampd UI', '≈ $400/mo, rising', 'now'),
-    (5, 'Beckham', 'Cooling Pillowcases 24175484375 (clone) + 24108462704', 'Pause the -50 clone; cut 24108462704 $150→$40; negatives: silk, satin, blissy', 'gads (structure lives in Google)', '$7.3k L30 at 0.28 ROAS → ≈ $5k/mo saved', 'now'),
-    (6, 'Beckham', 'Pillow Protector 24169545984 (clone) + 24108461696', 'Pause the -50 clone; cut 24108461696 $150→$50; negatives silk', 'gads', '$7.1k L30 at 0.49 ROAS → ≈ $4.5k/mo saved', 'now'),
-    (7, 'Beckham', 'Adjustable Foam Pillows 23969931558', 'Pause (0.06 ROAS L30, 0.22 P30)', 'gads', '≈ $1.4k/mo', 'now'),
-    (8, 'Beckham', 'Down Alternative 24102806289', 'Raise $150→$225 (3.37 L14 ROAS, 36% impression share lost to budget); pause clone 24169545333; negatives "hotel collection pillows"', 'gads', '+$2k/mo spend at ~30% ACOS', '09-17'),
-    (9, 'CGK Ampd', 'Storefront Deep Pocket KWs 21083360054', 'Bid "extra deep queen sheets" $2.39→$1.80 (56% AACOS on 47% of L14 spend); keep the other 08-26 raises', 'Ampd UI keyword pencil (Manual CPC) or gads', 'Campaign back toward 30% from 43%', '09-17'),
-    (10, 'CGK Ampd', '4PC Queen White 21510061819', 'Bid "queen sheet set" $1.25→$1.12 (10% rule; 40–48% AACOS, 93% of spend)', 'Ampd UI or gads', '−3 to −5 pts campaign AACOS', '09-17'),
-    (11, 'CGK Ampd', 'Core KWs US 24128873457', 'Convert to Manual CPC; bid "king size sheets on sale" at $0.65 (breakeven $0.72)', 'Ampd UI (bid mode) then keyword bid', 'Campaign from 49–52% toward 35%', '09-17'),
-    (12, 'CGK Ampd', '4PC Main Storefront 22564129915', 'Pause keyword "king sheets deep pocket" (483% L14); ceiling $2.00→$1.60', 'Ampd UI / gads', 'L14 74% → re-judge', '09-15'),
-    (13, 'CGK Ampd', 'Scale set: 6PC Extra Deep King 23472210370 (ceiling $1.40→$1.65), 21 Inch 6Pc Storefront 22452315321 (bid $0.83→$1.05), Full XL legacy 23576925357 (ceiling $1.00→$1.25), Flex Top Split 23582317199 ($0.75→$1.00), RV Short Queen 22719773443 (budget $24→$75, ceiling $0.71→$0.90), RV Core 24139407325 ($19→$50, $0.80→$1.00), Bulk 23864706143 ($1.00→$1.30), Extra Deep B018ZT6LU0 23467639163 ($1.25→$1.55), Oeko Tex 24069391339 ($0.50→$0.70)', 'All rank-limited (impression share lost to rank 40–72%, lost to budget <15%) at 3–25% AACOS. Raise the lever named; budgets are not the constraint except RV', 'gads (ceilings/bids) — Ampd UI for budgets', '+$1.5–2.5k/wk at ≤25% AACOS, funded by items 1, 3, 4', '09-17'),
-    (14, 'CGK Website', 'Pillowcases 23769689251, 21 In 4PC 22166226679, SK White 23963684825', 'Hold the 08-27 raises one more week; revert to $150 / $100 / $70 if L14 Google ROAS through 09-10 is below 1.6 (all three fell to 0.98–1.14 in the first week)', 'gads', 'Protects ≈ $250/d from running below 1.0', '09-10'),
-    (15, 'CGK Website', '6PC All Shopping 19342888496', 'Raise tROAS 1.5→1.8; inspect the conversion-action mix (3–7 conversions/day but ~$0 value since 08-19; Northbeam 0.19–0.38)', 'gads plan-bid-strategy', 'Stops ≈ $60/d at 0.3', 'now'),
-    (16, 'CGK Website', 'Brand search 13622723707', 'Add EXACT keywords: "ckg sheets", "ckg linens", "cjk linens", "cgk linen", "cgklinens", "cgk linens discount code", "cgk unlimited jersey sheets"; lower tROAS 10→6 (Northbeam puts brand at 2.2–3.4, Google at 7–10)', 'gads plan-keywords', 'Cheap brand volume currently leaking into Shopping', '09-17'),
-    (17, 'CGK Website', 'PMax 23836235206', 'Hold tROAS 1.5 to 09-10; step to 1.65 only if L14 ≥ 1.4 (currently 1.14 Google / 1.26 NB)', 'gads', '—', '09-10'),
-    (18, 'CGK Website', 'Comforters 23749922783', 'Lower tROAS 2.4→2.1 (2.3–2.5 delivered; 58% impression share lost to rank on $44/d of a $150 budget)', 'gads', '+$50–80/d at ≈2.1', '09-17'),
-    (19, 'CGK Website', 'Striped Sheets 23808252605', 'Pause (1 conversion on $119 L30, 0 on $59 L7)', 'gads', 'small', 'now'),
-    (20, 'SafeRest', 'King PDP 21188616141, Queen PDP 21080074925', 'Lower tROAS 3.0→2.6 on both (PixelMe truth 3.07 / 3.16; Google sees 2.3–2.4 because uploads lag; impression share lost to rank 86% / 79%). Queen spend halved MoM at unchanged settings', 'gads plan-bid-strategy', '+$100–200/d at ≈3.0 Amazon ROAS', '09-17'),
-    (21, 'CGK Ampd', 'Canada: 6PC King CANADA 21839192355, 4PC Top Performers 22574740272', '"king sheets" bid $0.98→$0.80; ceiling $1.50→$1.20 (CA pays no BRB; target ≈40%)', 'gads', 'CA lane 45–55% → ~40%', '09-17'),
-    (22, 'CGK', 'Google recommendations (refreshed 09-03)', 'Accept: RSA ad-strength (133) and sitelink (130) recommendations on [Ampd] campaigns — creative is safe via gads. Reject: marginal-ROI budget (+$9.8k cost for +$2.9k value), forecasting tROAS, every Maximize Conversions / Target CPA opt-in on [Ampd] campaigns, search partners, display expansion, broad match', 'gads', 'Creative build task for next week', '09-10'),
-    (23, 'All', 'Warehouse feeds', 'Add change_event + recommendation surfaces to the daily gads sync (both were 10+ days stale until this run); ampd.google_lane_daily fixed this session', 'gads_daily_sync.sh (both copies)', 'Changelog stays complete', 'now'),
+scale_rows = [
+    ('6PC Extra Deep Pocket King', '23472210370', '20%', 'ceiling $1.40 → $1.65'), ('21 Inch 6PC Storefront', '22452315321', '13%', 'bid $0.83 → $1.05'),
+    ('Full XL Sheets', '23576925357', '17%', 'ceiling $1.00 → $1.25'), ('Flex Top Split Head', '23582317199', '3%', 'ceiling $0.75 → $1.00'),
+    ('RV Short Queen', '22719773443', '28%', 'budget $24 → $75, ceiling $0.71 → $0.90'), ('RV Short Queen Core KWs', '24139407325', '24%', 'budget $19 → $50, ceiling $0.80 → $1.00'),
+    ('Bulk Sheets 4PC', '23864706143', '10%', 'ceiling $1.00 → $1.30'), ('6PC Extra Deep Pocket (B018ZT6LU0)', '23467639163', '16%', 'ceiling $1.25 → $1.55'), ('Oeko Tex Bed Sheets', '24069391339', '16%', 'ceiling $0.50 → $0.70')]
+t_scale = table(['Campaign', 'Stable AACOS', 'Change'], [[f'{a}<br><span class="id">{b}</span>', c, d] for a, b, c, d in scale_rows], aligns=['l', 'r', 'l'])
+
+changes = [
+    ('Aug 13', 'CGK', 'Four "Core KWs | US" campaigns created through Ampd; budgets cut on 4PC Queen White ($400 → $138), RV Short Queen ($500 → $24), Full XL ($250 → $20).'),
+    ('Aug 18 →', 'CGK', 'Flood Media (external) starts editing: 45 assets, BRAND #2 campaign, ad-group tROAS 2.25 → 2.0 on Aug 31.'),
+    ('Aug 21', 'CGK', '"amazon" keyword class resumes serving after 31 days dark.'),
+    ('Aug 24', 'Beckham', '8 campaigns with un-rewritten PixelMe URLs paused and rebuilt; PixelMe import starts failing on the vendor\'s side.'),
+    ('Aug 26', 'CGK', 'Audit executed: 24 plans, 270 changes (cuts, bid moves, negatives, renames, new harvest and Canada campaigns, PMax/Bed Skirt targets, DG $450 → $125).'),
+    ('Aug 27', 'CGK', 'Holden raises six website budgets (Pillowcases to $400, 21 In 4PC to $190, Bed Skirts to $160, Brand Excl to $150, Brand-Only to $150, SK White to $100) and sets DG to tCPA $60.'),
+    ('Aug 31', 'CGK', 'Through Ampd, actor unknown: Summer Comforters $100 → $250 (+ceiling $1.25), Bamboo Product Page $30 → $300.'),
+    ('Sep 3', 'Beckham', 'Three Core KW campaigns rebuilt inside PixelMe (24207685662, 24213411569, 24218651233), live at $150/day on Maximize Conversions; broken clones paused.'),
+    ('Sep 3', 'data', 'Ampd join view fixed for renamed campaigns; Google change-event and recommendation feeds re-synced and now daily.'),
 ]
-t_actions = table(['#', 'Lane', 'Campaign(s)', 'Action', 'Where the change is made', 'Expected effect', 'Judge by'], [[str(a), b, c, d, e, f, g] for a, b, c, d, e, f, g in actions], cls='dense', aligns=['r', 'l', 'l', 'l', 'l', 'l', 'l'])
+t_changes = table(['When', 'Account', 'What changed'], [[a, b, c] for a, b, c in changes], aligns=['l', 'l', 'l'])
 
-human = [
-    'The 08-31 Ampd-side changes (item 1): who made them, and is any Ampd automation (Ampd Protection / bid automation) enabled on the account?',
-    'Flood Media (josh@floodmedia.co) has been editing the CGK account since 08-18 (assets, the "BRAND #2" campaign, an ad-group tROAS). Confirm the access is intended — after the July compromise every external user should be deliberate.',
-    'Google ticket on the "amazon" keyword class: the class has been serving since 08-21 and all four previously-dark terms now serve (xl twin sheet amazon 24 impr, bamboo sheets amazon 107, sheet set amazon 114, best cooling sheets on amazon 262 in L14). The ticket can be closed as resolved.',
-    'Jul-2 compromise: $9,516 invalid-activity credit — still unconfirmed.',
-    '08-20/21 serving stoppage: billing check in the Google Ads UI still open.',
-    'PixelMe (Carbon6): 14 Beckham campaigns sit at import status -50; fresh links fail at -51. Until the vendor fixes its GAQL, no clone gets Google conversion uploads. Escalation is with Holden.',
-    'Demand Gen (item 2) and the 08-27 website budget raises (item 14) are owner decisions; the numbers are in the website section.',
-]
-
-# ---------------------------------------------------------------- html
 css = f"""
-@font-face {{ font-family: Raleway; src: url('file://{S}/raleway-variable.woff2') format('woff2'); font-weight: 100 900; font-style: normal; }}
-@font-face {{ font-family: Bitter; src: url('file://{S}/bitter-variable.woff2') format('woff2'); font-weight: 100 900; font-style: normal; }}
-@page {{ size: Letter; margin: 14mm 12mm 16mm 12mm; }}
+@font-face {{ font-family: Raleway; src: url('file://{S}/raleway-variable.woff2') format('woff2'); font-weight: 100 900; }}
+@page {{ size: Letter; margin: 15mm 13mm 16mm 13mm; }}
 * {{ box-sizing: border-box; }}
-body {{ font-family: Raleway, 'Helvetica Neue', Arial, sans-serif; color: {INK}; background: #fff; margin: 0; font-size: 10.2pt; line-height: 1.42; }}
-h1 {{ font-weight: 700; color: {NAVY}; font-size: 22pt; margin: 6px 0 2px; }}
-h2 {{ font-weight: 700; color: {NAVY}; font-size: 15pt; margin: 22px 0 6px; padding-bottom: 4px; border-bottom: 2px solid {POWDER}; page-break-after: avoid; }}
+body {{ font-family: Raleway, 'Helvetica Neue', Arial, sans-serif; color: {INK}; background: #fff; margin: 0; font-size: 10.1pt; line-height: 1.42; }}
+h1 {{ font-weight: 700; color: {NAVY}; font-size: 21pt; margin: 8px 0 2px; }}
+h2 {{ font-weight: 700; color: {NAVY}; font-size: 15pt; margin: 20px 0 6px; padding-bottom: 4px; border-bottom: 2px solid {POWDER}; page-break-after: avoid; }}
 h3 {{ font-weight: 600; color: {NAVY}; font-size: 11.5pt; margin: 14px 0 4px; page-break-after: avoid; }}
-h4 {{ font-weight: 600; color: {INK}; font-size: 9.5pt; letter-spacing: 0.1em; text-transform: uppercase; margin: 12px 0 4px; }}
-p {{ margin: 4px 0 7px; }}
+p {{ margin: 4px 0 8px; }}
 .logo {{ width: 120px; height: auto; display: block; }}
-.wordmark {{ font-weight: 900; color: {NAVY}; letter-spacing: 0.12em; font-size: 14pt; }}
-.meta {{ color: #4a5568; font-size: 9pt; margin-bottom: 8px; }}
-.kpis {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0 12px; }}
-.kpi {{ background: {POWDER}; border-radius: 6px; padding: 8px 10px; }}
-.kpi .l {{ font-size: 7.5pt; letter-spacing: 0.1em; text-transform: uppercase; color: {NAVY}; font-weight: 600; }}
-.kpi .v {{ font-size: 17pt; font-weight: 700; color: {NAVY}; line-height: 1.15; margin-top: 2px; }}
-.kpi .s {{ font-size: 8pt; color: {DEEP}; margin-top: 2px; }}
-.callout {{ background: {LINEN}; color: {NAVY}; border-radius: 6px; padding: 8px 12px; margin: 8px 0 10px; }}
-.callout b {{ color: {NAVY}; }}
-table {{ border-collapse: collapse; width: 100%; margin: 6px 0 10px; font-size: 8.6pt; page-break-inside: auto; }}
+.meta {{ color: #4a5568; font-size: 9pt; margin-bottom: 10px; }}
+.kpis {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin: 8px 0 12px; }}
+.kpi {{ background: {POWDER}; border-radius: 6px; padding: 9px 11px; }}
+.kpi .l {{ font-size: 7.6pt; letter-spacing: 0.1em; text-transform: uppercase; color: {NAVY}; font-weight: 600; }}
+.kpi .v {{ font-size: 16pt; font-weight: 700; color: {NAVY}; line-height: 1.15; margin-top: 2px; }}
+.kpi .s {{ font-size: 8.4pt; color: {DEEP}; margin-top: 3px; line-height: 1.35; }}
+.callout {{ background: {LINEN}; color: {NAVY}; border-radius: 6px; padding: 9px 13px; margin: 8px 0 10px; }}
+.gloss {{ display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; font-size: 9pt; color: #2d3748; background: #fff; border: 1px solid {LINEN}; border-radius: 6px; padding: 8px 12px; margin: 8px 0 4px; }}
+.gloss b {{ color: {NAVY}; }}
+table {{ border-collapse: collapse; width: 100%; margin: 6px 0 10px; font-size: 8.6pt; table-layout: fixed; }}
+table.v5 th:nth-child(1) {{ width: 33%; }} table.v5 th:nth-child(2), table.v5 th:nth-child(3), table.v5 th:nth-child(4) {{ width: 11%; }} table.v5 th:nth-child(5) {{ width: 34%; }}
+table.v7 th:nth-child(1) {{ width: 26%; }} table.v7 th:nth-child(n+2):nth-child(-n+6) {{ width: 9.5%; }} table.v7 th:nth-child(7) {{ width: 26.5%; }}
+table.bk th:nth-child(1) {{ width: 24%; }} table.bk th:nth-child(n+2):nth-child(-n+6) {{ width: 10%; }} table.bk th:nth-child(7) {{ width: 26%; }}
+table.full th:nth-child(1) {{ width: 36%; }} table.full th:nth-child(n+2) {{ width: 12.8%; }}
+td.r {{ font-variant-numeric: tabular-nums; }}
 thead {{ display: table-header-group; }}
 tr {{ page-break-inside: avoid; }}
-th {{ background: {POWDER}; color: {NAVY}; font-weight: 700; text-align: left; padding: 5px 6px; border-bottom: 1px solid {POWDER}; font-size: 8pt; }}
-td {{ padding: 4px 6px; border-bottom: 1px solid {LINEN}; vertical-align: top; }}
-td.r, th.r {{ text-align: right; white-space: nowrap; }}
-table.dense {{ font-size: 7.9pt; }}
-table.dense td {{ padding: 3px 5px; }}
-.id {{ color: #5b6472; font-size: 7.2pt; font-weight: 400; }}
-.chart {{ width: 100%; height: auto; margin: 4px 0 8px; }}
+th {{ background: {POWDER}; color: {NAVY}; font-weight: 700; text-align: left; padding: 5px 7px; font-size: 8.4pt; }}
+td {{ padding: 4px 6px; border-bottom: 1px solid {LINEN}; vertical-align: top; overflow-wrap: anywhere; }}
+td.r {{ text-align: right; white-space: nowrap; }} th.r {{ text-align: right; white-space: normal; }}
+.id {{ color: #5b6472; font-size: 7.6pt; font-weight: 400; }}
+.tag {{ display: inline-block; font-weight: 700; font-size: 7.6pt; letter-spacing: 0.06em; text-transform: uppercase; border-radius: 3px; padding: 1px 6px; margin-right: 5px; color: {NAVY}; background: {POWDER}; }}
+.tag.cut, .tag.fix {{ background: {LINEN}; color: {NAVY}; }}
+.tag.scale {{ background: {NAVY}; color: #fbf9f8; }}
+.tag.watch {{ background: #fff; border: 1px solid {POWDER}; }}
+table.decide td:first-child {{ width: 17%; }} table.decide td:last-child {{ width: 27%; color: {NAVY}; font-weight: 600; }}
+table.ready td:first-child {{ width: 13%; white-space: nowrap; color: #4a5568; }}
+.chart {{ width: 100%; height: auto; margin: 4px 0 6px; }}
 .chart .axis {{ font-family: Raleway, Arial, sans-serif; font-size: 8.5px; fill: #4a5568; }}
-.chart .dlabel {{ font-family: Raleway, Arial, sans-serif; font-size: 9px; fill: {INK}; font-weight: 600; }}
 .chart .marker {{ fill: {INK}; font-size: 8px; }}
-ul {{ margin: 4px 0 8px 18px; padding: 0; }}
-li {{ margin: 2px 0; }}
-.two {{ display: grid; grid-template-columns: 3fr 2fr; gap: 14px; align-items: start; }}
+ul {{ margin: 4px 0 8px 18px; padding: 0; }} li {{ margin: 3px 0; }}
 .pb {{ page-break-before: always; }}
-.footer {{ position: running(footer); }}
-.small {{ font-size: 8.5pt; color: #4a5568; }}
-.tag {{ display: inline-block; font-family: Bitter, Georgia, serif; font-weight: 600; font-size: 7.5pt; color: {NAVY}; background: {POWDER}; border-radius: 3px; padding: 1px 6px; margin-right: 4px; }}
-.gold {{ color: {GOLD}; font-weight: 700; }}
+.small {{ font-size: 8.6pt; color: #4a5568; }}
+.two {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }}
 """
 
 html = f"""<!doctype html><html><head><meta charset="utf-8"><title>CGK Google Ads weekly review — 2026-09-03</title><style>{css}</style></head><body>
 {logo_tag}
-<h1>Google Ads weekly review — Ampd, website, PixelMe</h1>
-<div class="meta">Prepared 3 September 2026 by Nova · Accounts: CGK Linens 730-417-6160 (Ampd lane + website lane), GTA Beckham Home 381-888-5747 (PixelMe), GTA SafeRest 559-064-2315 (PixelMe). Hotel Sheets Direct 881-986-7229, DTC Beckham 675-743-0621 and CGK Walmart 242-570-9513 had no spend in the window.<br>
-Windows: <b>Last 30</b> = Aug 4–Sep 2 (Google) / Aug 4–Sep 1 (Ampd, PixelMe) · <b>Prior 30</b> = Jul 5–Aug 3 · <b>Stable 30</b> = Jul 21–Aug 19 (ends 14 days back; the Amazon-attribution window for optimization decisions) · <b>Last 14</b> = Aug 19/20–Sep 1/2 (directional only; Amazon attribution is a 14-day post-click window and matures for 10–17 days).<br>
-Sources: google_ads_tw (Google, data through Sep 2, all six accounts synced 09-03), ampd.* (Ampd exports through Sep 1), pixelme.* (through Sep 2), northbeam.export_daily (Clicks-only model, 7-day accrual unless stated; Google website attribution valid from Aug 27 after cgk.com became a managed domain). Currency USD. AACOS = (cost − Brand Referral Bonus) / Amazon revenue, Ampd's definition; target 30–35% (≈40% for amazon.ca, which pays no BRB).</div>
+<h1>Google Ads weekly review</h1>
+<div class="meta">3 September 2026 · prepared by Nova · covers CGK Linens (the Amazon-bound "Ampd" lane and the cgk.com website lane), Beckham Home and SafeRest (both attributed through PixelMe). Hotel Sheets Direct, DTC Beckham and CGK Walmart had no spend.<br>
+Windows: <b>Last 30</b> = Aug 4 – Sep 2 · <b>Prior 30</b> = Jul 5 – Aug 3 · <b>Stable 30</b> = Jul 21 – Aug 19, the window Amazon-bound decisions are made on (Amazon attribution takes 10–17 days to settle) · <b>Last 14</b> is shown for direction only.</div>
 
 <div class="kpis">
- <div class="kpi"><div class="l">CGK Ampd lane · L30</div><div class="v">{money(ampd_win['L30']['spend'])}</div><div class="s">→ {money(ampd_win['L30']['rev'])} Amazon revenue · AACOS {pct(ampd_win['L30']['aacos'])} · vs P30 {money(ampd_win['P30']['spend'])} at {pct(ampd_win['P30']['aacos'])}</div></div>
- <div class="kpi"><div class="l">CGK website lane · L30</div><div class="v">$36,591</div><div class="s">Google value $58,115 (1.59x) · Northbeam 7d-click $42,830 (1.17x) · vs P30 $19,343 at 1.98x</div></div>
- <div class="kpi"><div class="l">Beckham Home (PixelMe) · L30</div><div class="v">$67,268</div><div class="s">PixelMe sees $63,018 → $132,739 Amazon revenue (2.11x, 47% ACOS) · storefront 2.82x, non-brand 0.87x · vs P30 $37,080</div></div>
- <div class="kpi"><div class="l">SafeRest (PixelMe) · L30</div><div class="v">$13,667</div><div class="s">→ $42,394 Amazon revenue (3.10x, 32% ACOS) · Google-side 2.43x · vs P30 $15,527</div></div>
+ <div class="kpi"><div class="l">CGK Amazon lane (Ampd)</div><div class="v">34.0%</div><div class="s">AACOS on $50.8k spend → $115k Amazon revenue. Target 30–35%. August closed at 32.4%; July was 35.5%.</div></div>
+ <div class="kpi"><div class="l">CGK website lane</div><div class="v">1.59x</div><div class="s">Google ROAS on $36.6k spend; Northbeam says 1.17x. Spend nearly doubled vs the prior 30 days (1.98x).</div></div>
+ <div class="kpi"><div class="l">Beckham Home (PixelMe)</div><div class="v">2.11x</div><div class="s">$63k → $133k Amazon revenue. Storefront 2.82x; non-brand campaigns 0.87x. Spend +81% vs prior 30.</div></div>
+ <div class="kpi"><div class="l">SafeRest (PixelMe)</div><div class="v">3.10x</div><div class="s">$13.7k → $42.4k Amazon revenue, 32% ACOS, steady in every window.</div></div>
 </div>
 
-<h2>Executive summary</h2>
+<h2>Read this first</h2>
 <ul>
-<li><b>The CGK Ampd lane is at target and smaller.</b> August closed at $55,906 spend → $131,248 Amazon revenue, 32.4% AACOS (July: $71,807 at 35.5%). Last-30 AACOS is 34.0% with 99% mirror coverage. Spend is down 28% month over month; the weekly run-rate recovered to $14.7k in the week of Aug 24 (34.5%, still maturing) after the Aug 20–21 stoppage trough of $9.3k.</li>
-<li><b>The "amazon" keyword class is back.</b> 175 keywords served in the week of Aug 24 (168–170 before the block) and the class took 31% of lane spend at 34% fresh AACOS; it ran at 19–21% when stable in July. All four terms that were still dark on Aug 24 now serve. Judge the recovered efficiency from Sep 8.</li>
-<li><b>Something reversed two of the Aug 26 cuts on Aug 31 at 04:10 ET through Ampd.</b> Summer Comforters went $100→$250/day (ceiling $1.00→$1.25) and Bamboo Product Page $30→$300/day. No team member is on record for it; if nobody did it, Ampd automation is live on the account and must be found and disabled. This is item 1.</li>
-<li><b>The website lane doubled and got less efficient.</b> $36.6k spent in L30 (P30 $19.3k): Demand Gen/YouTube took $12.2k at 0.65 Google / 0.52 Northbeam, and Holden's Aug 27 budget raises (Pillowcases $75→$400, 21 In 4PC $75→$190, SK White $55→$100 and three more) pushed the first post-raise week to 1.45 Google / 1.19 Northbeam. Three of the raised campaigns fell below 1.2 in that week; the recommendation is to hold one more week and revert on a rule.</li>
-<li><b>Beckham Home spend rose 81% and the non-brand expansion is losing money except one product.</b> The storefront lane is healthy ($39.9k → $112.5k, 2.82x) but with diminishing returns (3.28x → 2.62x as spend rose). Non-brand: Down Alternative pillows 2.02x (3.37x in L14) works; Cooling Pillowcases 0.28x, Pillow Protectors 0.49x and the Adjustable Foam pillow 0.06x do not — $15.9k of L30 spend for $5.6k of revenue. The three Aug 24 clones still fail PixelMe import (-50), so Google sees no conversions for them and bids blind.</li>
-<li><b>SafeRest is steady at 3.0–3.2x on Amazon in every window</b> and is rank-limited (79–86% of impression share lost to rank at tROAS 3.0); Queen PDP spend halved on unchanged settings. Lower tROAS to 2.6 to buy volume.</li>
-<li><b>Data:</b> the Google change-event and recommendation feeds had been stale since Aug 21/24 and were re-synced today; the Ampd join view mis-read the two campaigns renamed on Aug 26 as unattributed ($29k) and is fixed. Northbeam can only judge Google website campaigns from Aug 27.</li>
+<li><b>The Amazon lane is healthy and smaller.</b> Spend is down 28% month over month while AACOS improved 3 points. The "amazon" keywords that Google blocked for a month are fully back (175 serving, 31% of spend); their efficiency is judged from Sep 8.</li>
+<li><b>Two of the Aug 26 cuts were undone on Aug 31 through Ampd by an unknown actor.</b> That is decision 1 below.</li>
+<li><b>The website lane grew fast and got less efficient:</b> Demand Gen at 0.65x, and three of the campaigns whose budgets were raised on Aug 27 fell to about 1.0x in week one.</li>
+<li><b>Beckham non-brand loses money except Down Alternative pillows.</b> The three campaigns that could not link to PixelMe were rebuilt inside PixelMe today and are live; the broken copies are paused.</li>
+<li><b>SafeRest is steady at 3.1x</b> and is being throttled by its own target; a lower target buys volume.</li>
 </ul>
+<div class="callout"><b>Net of everything below:</b> stop about $11–12k a month that runs at 0.06–0.49x, and move $6–10k a month into nine Amazon-lane campaigns at 3–25% AACOS, Down Alternative pillows at about 30% ACOS, and SafeRest at about 3x. Nothing in this document has been changed in an account except the Beckham rebuild you asked for.</div>
 
-<div class="callout"><b>Net of the action list:</b> stop ≈ $11–12k/month of spend running at 0.06–0.49x (Beckham non-brand, Demand Gen, Fleece, Cooling Bed Sheets, the two Aug 31 re-opened budgets) and redeploy ≈ $6–10k/month into nine rank-limited Ampd campaigns at 3–25% AACOS, Down Alternative pillows at ≈30% ACOS, and SafeRest at ≈3.0x.</div>
+<h3>Decisions I need from you</h3>
+{t_decisions}
 
-<h2 class="pb">1 · CGK Ampd lane (Amazon-bound, 37 campaigns)</h2>
-<p>Spend is Google-billed; revenue, Brand Referral Bonus and conversions are Ampd's Amazon attribution. Mirror coverage is the share of Google spend Ampd reports; below 95% the AACOS row is computed on a partial base.</p>
+<div class="gloss">
+<div><b>AACOS</b> = (ad cost − Amazon's Brand Referral Bonus) ÷ Amazon revenue. Lower is better; target 30–35% (≈40% in Canada, which pays no bonus).</div>
+<div><b>ROAS</b> = revenue ÷ ad cost. Google's number is last-click and over-credits brand search; Northbeam is the truth source for the website lane from Aug 27 onward.</div>
+<div><b>Stable 30</b>: Amazon-bound campaigns are judged only on this window. Anything labeled "Last 14" will improve as attribution matures.</div>
+<div><b>Ceiling / bid</b>: Maximize Clicks campaigns have one Max CPC ceiling; Manual CPC campaigns have keyword bids. "Rank-limited" means we lose auctions on bid, not on budget, so the lever is the ceiling or bid.</div>
+</div>
+
+<h2>1 · CGK Amazon lane (Ampd, 37 campaigns)</h2>
+<p>Spend is what Google billed; revenue, bonus and orders are Ampd's Amazon attribution. Ampd's export covers 99% of the spend in every window shown.</p>
 {t_ampd_windows}
 {chart_ampd}
-<p class="small">Daily Google spend on [Ampd] campaigns (area) against Amazon attributed revenue plus BRB (line), Jun 1–Sep 1. The last ~10 days of revenue are structurally understated (attribution still maturing).</p>
+<h3>The "amazon" keywords are back</h3>
+<p>Terms containing "amazon" were the efficient half of this lane (19–21% AACOS in July) until Google stopped serving them on Jul 21. They resumed on Aug 21 and by the week of Aug 24 were at 175 keywords and 31% of spend. The week-of-Aug-24 AACOS is still maturing.</p>
+{t_kw}
 
-<h3>Keyword class: "amazon"-qualified vs generic</h3>
-<div class="two"><div>{t_kw}</div><div>{chart_kw}<p class="small">Weekly spend by keyword class. The class went dark Jul 21 and returned Aug 21; the week of Aug 24 is the first full week back. AACOS for the last two weeks is immature.</p></div></div>
-
-<h3>Campaign table</h3>
-<p class="small">Stable = Jul 21–Aug 19 (decision window). L30 = Aug 4–Sep 1. L14 = Aug 19–Sep 1 (immature, shown for direction). Lever shows the live Max CPC ceiling (Maximize Clicks campaigns) or the ad-group bid (Manual CPC). Campaigns under $40 in both windows are omitted.</p>
+<h3>Campaigns worth a decision (stable-window spend of $150 or more)</h3>
+<p class="small">Verdicts: <b>Keep</b> = no change · <b>Watch</b> = a change is already in flight, judge on the date given · <b>Fix</b> = a bid, ceiling, budget or keyword change · <b>Cut</b> = pause · <b>Scale</b> = raise the lever named. Full campaign detail is in the appendix.</p>
 {t_ampd_campaigns}
 
-<h3>Keyword concentration (stable window, from <code>ampd kw-report</code>)</h3>
+<h3>Scale set: efficient campaigns losing auctions on rank</h3>
+<p>All nine run at 3–25% AACOS and lose 40–72% of available impressions to rank, under 15% to budget. Raising the ceiling or bid is the lever; budgets are not the constraint except for the two RV campaigns, which were over-cut on Aug 14.</p>
+{t_scale}
+<h3>Early read on the Aug 26 changes</h3>
 <ul>
-<li><b>Hogs:</b> "queen sheet set" 93% of 4PC Queen White (21510061819), $5,109 at 48%, CPC $1.30 vs breakeven $1.00 → bid down (owner kept $1.25 on Aug 26; the 10% rule now says $1.12). "duvet cover set" 61% of Duvet Storefront at 104% → already paused/isolated Aug 26; the isolated campaign (24182840078) has spent $9 in 8 days at its $0.30 breakeven ceiling — expected. "king size sheets on sale" 27–84% of two campaigns at 57–67% → convert Core KWs US to Manual CPC and bid it at $0.65. "soft blanket" 36% of Fleece at 66% → the campaign pauses. "dorm bed skirt twin xl" 46% at 43% and "sheets king size deep pocket" 53% at 41% → hold, seasonal / within 10 pts.</li>
-<li><b>Starved winners (30):</b> "deep pocket king sheets" 5%, "sheets queen deep" 5% (in 21 Inch 6Pc Storefront, CPC $0.53), "extra deep pocket king sheets" 14%, "california king deep pocket sheet" 25%, "full xl sheets" 18%, "flex split king sheets" 15%, "softest sheets on amazon" 13% — all with $50–390 of headroom before reaching 35%. These are the campaigns in the scale set (action 13).</li>
-<li><b>Early read on the Aug 26 changes</b> (Aug 27–Sep 1, immature): Duvet Storefront 78% → 36% after the "duvet cover set" pause; Storefront Deep Pocket KWs 26% → 43% after the +10/15/25% raises ("extra deep queen sheets" now $2.39 CPC at 56%) → partial revert (action 9); Light Grey 2 amazon class at 36–44% after +25% (was 19–21% pre-block) → hold to Sep 10; Full XL legacy still only $12/day at $1.00 ceiling with 47% rank-lost → raise again.</li>
+<li>Duvet Cover Storefront: 78% → 36% after "duvet cover set" was paused and isolated. Working.</li>
+<li>Storefront Deep Pocket KWs: 26% → 43% after the +10/15/25% bid raises; "extra deep queen sheets" now costs $2.39 a click at 56%. Partial revert (bid $1.80).</li>
+<li>Light Grey 2 amazon keywords: 36–44% after the +25% raise, against 19–21% before the block. Hold and judge Sep 10.</li>
+<li>Full XL: still only $12 a day at the $1.00 ceiling with 47% of auctions lost on rank. Raise again.</li>
 </ul>
 
-<h2 class="pb">2 · CGK website lane (cgk.com, 18 campaigns)</h2>
-<p>Google conversion value is last-click, Google-measured; Northbeam is Clicks-only 7-day accrual. Northbeam under-credited Google before Aug 27 (cgk.com was logged as a referrer), so only the L7 columns compare the two fairly. Brand search is the clearest example: Google 7–10x, Northbeam 2.2–3.4x.</p>
+<h2>2 · CGK website lane (cgk.com, 18 campaigns)</h2>
 <div class="kpis">
- <div class="kpi"><div class="l">L30 spend</div><div class="v">$36,591</div><div class="s">P30 $19,343 (+89%)</div></div>
- <div class="kpi"><div class="l">L30 Google value</div><div class="v">1.59x</div><div class="s">$58,115 · 1,289 conv · P30 1.98x</div></div>
- <div class="kpi"><div class="l">L30 Northbeam 7d</div><div class="v">1.17x</div><div class="s">$42,830 · 622 orders (understated before Aug 27)</div></div>
- <div class="kpi"><div class="l">L7 Aug 27–Sep 2</div><div class="v">1.45x / 1.19x</div><div class="s">$8,868 spend · Google $12,892 · Northbeam $10,590 (still maturing)</div></div>
+ <div class="kpi"><div class="l">Last-30 spend</div><div class="v">$36,591</div><div class="s">Prior 30: $19,343 (+89%)</div></div>
+ <div class="kpi"><div class="l">Google ROAS</div><div class="v">1.59x</div><div class="s">$58,115 value · 1,289 orders · prior 30 was 1.98x</div></div>
+ <div class="kpi"><div class="l">Northbeam ROAS</div><div class="v">1.17x</div><div class="s">$42,830 · 622 orders · understated before Aug 27</div></div>
+ <div class="kpi"><div class="l">Last 7 (Aug 27 – Sep 2)</div><div class="v">1.45x / 1.19x</div><div class="s">Google / Northbeam on $8,868 · the first fair comparison</div></div>
 </div>
 {chart_web}
-<p class="small">Daily website-lane spend (area) and Google-reported conversion value (line), Jun 1–Sep 2.</p>
+<p>Google's conversion value is last-click and over-credits brand search (Google 7–10x, Northbeam 2.2–3.4x). Northbeam only started measuring cgk.com correctly on Aug 27, so the Last-7 columns are the fair comparison; the Last-30 Northbeam column is understated.</p>
 {t_web}
-<h4>Search terms</h4>
 <ul>
-<li>Waste is minimal: only two terms over $40 with zero conversions in L30 ("deep pocket sheets" $86, "extra deep pocket queen sheets" $41, both in 21 In 4PC Shopping and both now covered by the Aug 26 negatives).</li>
-<li>Brand misspellings and variants reach the site through Shopping instead of the brand campaign: "ckg sheets", "ckg linens", "cjk linens", "cgk linen", "cgklinens", "cgk linens discount code" — 3–18x ROAS, no exact keyword (action 16).</li>
-<li>Deal-site traffic ("cbs deals", "cbsdeals com", "localsteals com", "steal and deals today show") converts at 4–33x inside Shopping; the harvest campaign's CBS Deals ad group is the right home for it.</li>
+<li><b>Search-term waste is minimal:</b> only two terms over $40 with no orders, both already covered by the Aug 26 negatives.</li>
+<li><b>Brand misspellings</b> ("ckg sheets", "cjk linens", "cgklinens", "cgk linens discount code") convert at 3–18x but reach the site through Shopping because the brand campaign has no exact keyword for them.</li>
+<li><b>Deal-site traffic</b> ("cbs deals", "localsteals") converts at 4–33x inside Shopping; the new harvest campaign's CBS Deals ad group is the right home for it.</li>
 </ul>
 
-<h2 class="pb">3 · Beckham Home — PixelMe lane (GTA 381-888-5747)</h2>
-<p>Google conversions on this account are PixelMe's uploaded "Pixelme Attribution Purchases" (3–4 day lag; zero for campaigns PixelMe did not rewrite). PixelMe's product-level Amazon numbers are the truth for revenue; they carry no Brand Referral Bonus column, so ACOS here is gross of the ~10% BRB.</p>
-{t_bk_products}
-{chart_bk}
-<p class="small">Beckham Home daily PixelMe ad cost (area) and Amazon attributed revenue (line), Jul 5–Sep 2.</p>
+<h2>3 · Beckham Home (PixelMe, 381-888-5747)</h2>
+<p>Spend rose 81% to $67.3k. The storefront campaigns are healthy but returns fall as spend rises. Of the non-brand products, only Down Alternative pillows make money.</p>
 {t_bk}
+{chart_bk}
+<div class="callout"><b>Done today, on your instruction:</b> the three Core KW campaigns that PixelMe could not import (its vendor bug is still live) were rebuilt inside PixelMe, where no import is needed. They are live at $150/day on Maximize Conversions with their full keyword sets: Down Alternative 24207685662, Pillow Protectors 24213411569, Cooling Pillowcases 24218651233. The broken copies are paused. Google conversions will start appearing 3–4 days after first clicks; the ads are in Google's policy review as of this evening.</div>
 <ul>
-<li><b>Search terms behind the losses:</b> Cooling Pillowcases spend goes to silk queries ("silk pillow cases amazon" $218, "silk pillowcase" $164, "amazon silk pillowcase" $139, "blissy pillowcase amazon" $127, "silk pillowcases amazon" $96 — 0–2 conversions between them); Pillow Protector to "pillow protector(s)" generic at 0 conv; Down Alternative to "nuzzle pillow amazon" ($317, 4 conv) and "pillows" ($209, 0). The storefront terms are healthy ("hotel pillows" $3,311 / 89 conv, "beckham hotel collection pillows" $1,246 / 149).</li>
-<li><b>PixelMe status:</b> 18 campaigns linked and live (status 4), 14 at import-failed (-50, the Aug 24 clones and earlier), 5 paused. The three spending -50 clones (24169545333, 24169545984, 24175484375; $4.2k L30) get Amazon attribution from their hand-set URLs but no Google conversion upload, so Maximize Conversions has nothing to optimize on.</li>
+<li><b>Where the losses come from:</b> Cooling Pillowcases spend goes to silk queries ("silk pillowcase", "blissy pillowcase amazon" — 0–2 orders); Pillow Protectors to generic "pillow protector(s)" at 0 orders; Down Alternative to "nuzzle pillow amazon" (competitor, $317, 4 orders). The storefront terms are healthy ("hotel pillows" $3,311 / 89 orders).</li>
+<li><b>Storefront Pillows (21144235438):</b> 82% impression share, nothing lost to budget, ROAS 3.28x → 2.62x as spend rose. Hold the budget; the floor is 2.5x.</li>
 </ul>
 
-<h2>4 · SafeRest — PixelMe lane (GTA 559-064-2315)</h2>
-{t_sr}<h4>PixelMe (Amazon truth) by window</h4>{t_sr_pm}
+<h2>4 · SafeRest (PixelMe, 559-064-2315)</h2>
+{t_sr}
 <ul>
-<li>Both PDP campaigns run Maximize Conversion Value with tROAS 3.0 and lose 79–86% of impression share to rank with zero lost to budget; King spends $269/day of $300, Queen $118/day of $700 (P30: $215/day). PixelMe's Amazon ROAS is 3.07–3.16 in every window, Google's uploaded value reads 2.3–2.4 because of the upload lag — so Google is throttling a campaign that is above target on the truth source. Action 20 lowers tROAS to 2.6 on both.</li>
-<li>Google recommends broad match here (+$2.8k cost for +$6.4k value on Google's own estimate). Decline for now; the search-term report is the safer expansion path.</li>
+<li>Both protector campaigns run Maximize Conversion Value with a 3.0 target and lose 79–86% of available impressions on rank, none on budget. Google sees 2.3–2.4x because PixelMe's conversion upload lags; the Amazon truth is 3.1x. Lowering the target to 2.6 buys volume at about 3x.</li>
+<li>Queen PDP spend halved month over month on unchanged settings ($215 → $118 a day) — the same throttling.</li>
+<li>Google suggests broad match here (+$2.8k cost for +$6.4k value, its own estimate). Decline for now; expand from the search-term report instead.</li>
 </ul>
 
-<h2 class="pb">5 · What changed in the accounts (Aug 4 – Sep 3)</h2>
-<p class="small">Compiled from google_ads_tw.google_change_events (re-synced today through Aug 31/Aug 24), ampd.change_log, and the session records for the Aug 6/24/26 audits. "Ampd (adwords-manager@metricstory)" is the identity every Ampd UI action and every Ampd automation writes under.</p>
-{t_changelog}
+<h2>5 · Ready to execute on your OK</h2>
+<p class="small">Every change goes plan → validate → your approval → live, with a Slack recap. For CGK [Ampd] campaigns, budgets, bids, ceilings, keywords and negatives are attribution-safe through gads; campaign creation stays in Ampd. Beckham and SafeRest structure changes go through Google; PixelMe owns only the product links.</p>
+{t_ready}
 
-<h2>6 · Ranked action list</h2>
-<p class="small">"Where" follows the house routing rules: CGK [Ampd] campaign creation and ASIN linking only in Ampd; keywords, negatives, budgets and bids are attribution-safe via gads (verified Aug 13) but Ampd may reconcile them; PixelMe brands change structure in Google and linkage in PixelMe. Every gads change is plan → validate → owner approval → --confirm-live with a Slack recap.</p>
-{t_actions}
+<h2>6 · What changed in the accounts, Aug 13 – Sep 3</h2>
+<p class="small">Highlights. The complete changelog by date, brand and actor lives in Obsidian under Hermes / Google Ads / Account Changelog. In Google's change history, "adwords-manager@metricstory.com" is Ampd — a person in the Ampd UI or Ampd's automation.</p>
+{t_changes}
 
-<h2>7 · Open items that need a person</h2>
-<ul>{''.join(f'<li>{h}</li>' for h in human)}</ul>
-
-<h2>8 · Google recommendations (refreshed Sep 3)</h2>
-<p>CGK: 2,762 open; Beckham Home: 261; SafeRest: 505. The only ones with a dollar impact worth reading: CGK marginal-ROI campaign budget (+$9,800 cost for +$2,877 value → reject), forecasting tROAS (+$8,352 cost for +$8,894 value → reject), move-unused-budget on SK White / Bamboo Cooling / 6PC All / Demand Gen (noted, no action), Beckham broad match (+$12,110 cost for +$4,585 value → reject), SafeRest broad match (+$2,812 for +$6,399 → decline for now). Accept the creative-only classes on [Ampd] campaigns: 133 RSA ad-strength and 130 sitelink recommendations across 41–44 campaigns.</p>
-
-<h2>9 · Analysis log</h2>
-{t_analysis_log}
-
-<h2>Appendix · definitions and freshness</h2>
+<h2 class="pb">Appendix</h2>
+<h3>Sources and freshness (Sep 3, 13:30 ET)</h3>
 <ul>
-<li><b>AACOS</b> = (Google cost − Brand Referral Bonus) / Amazon attributed revenue (Ampd's column). The BRB rebates cost; it is not revenue. amazon.ca campaigns earn no BRB, so their target is ≈40%.</li>
-<li><b>Attribution lag:</b> Ampd and PixelMe attribute 14 days post-click and take 10–17 days to settle. Every "L14" figure will improve; decisions are made on the stable window only.</li>
-<li><b>Impression share</b> figures are live Google Ads API reads for Aug 20–Sep 2 (search campaigns only; Shopping/PMax report lost-to-budget and lost-to-rank without a top-share).</li>
-<li><b>Northbeam</b> rows: platform_norm = google, kind = native, accounting = accrual, model = northbeam_custom (Clicks only), window = 7 unless labeled; [Ampd] campaigns always show $0 Northbeam revenue because they land on amazon.com.</li>
-<li><b>Freshness at run time (Sep 3, 13:30 ET):</b> Google performance through Sep 3 (partial) for all six accounts; Ampd exports through Sep 1; PixelMe through Sep 2; Northbeam export_daily through Sep 2 with hourly bucket ingest; Google change events through Aug 31 (CGK) / Aug 24 (Beckham Home, no later events); recommendations Sep 3.</li>
-<li><b>Warehouse fix shipped this run:</b> ampd.google_lane_daily maps historical Google campaign names through ampd.campaign_name_fix (commit e6325a6 in ~/Tools/ampd-cli). Before the fix, campaign_daily_complete showed 23350268344 as $14.7k unattributed in the stable window; it is actually $14.7k → $33.2k at 34.8%.</li>
+<li>Google Ads: warehouse `google_ads_tw`, data through Sep 2 for all six accounts; impression share, budgets and targets read live from the API for Aug 20 – Sep 2.</li>
+<li>Ampd (Amazon attribution for CGK): exports through Sep 1. Coverage of Google spend 99% in every window used.</li>
+<li>PixelMe (Amazon attribution for Beckham and SafeRest): through Sep 2. Its ACOS is gross of the ~10% Brand Referral Bonus.</li>
+<li>Northbeam: Clicks-only model, 7-day window, accrual accounting. Valid for Google website campaigns from Aug 27 (cgk.com became a managed domain on Aug 26). [Ampd] campaigns always show $0 Northbeam revenue because they land on amazon.com.</li>
+<li>Google change history and recommendations re-synced today (they had been stale since Aug 21 / Aug 24) and now sync daily.</li>
 </ul>
+<h3>Data fixes shipped this run</h3>
+<ul>
+<li>The Ampd join view mis-read the two campaigns renamed on Aug 26 as $29k of unattributed spend. Fixed; 6PC King Deep Pocket KWs is actually $14.7k → $33.2k at 34.8% in the stable window.</li>
+<li>Google's bid-strategy update masks were rejected by the API in our CLI; fixed and pushed.</li>
+</ul>
+<h3>Google recommendations (refreshed Sep 3)</h3>
+<p>CGK 2,762 open, Beckham 261, SafeRest 505. Worth reading: CGK marginal-ROI budget (+$9.8k cost for +$2.9k value → reject), forecasting tROAS (+$8.4k for +$8.9k → reject), Beckham broad match (+$12.1k for +$4.6k → reject), SafeRest broad match (+$2.8k for +$6.4k → decline for now). Accept the creative-only classes on [Ampd] campaigns (133 RSA improvements, 130 sitelinks).</p>
+<h3>Analysis history</h3>
+<ul>
+<li><b>Aug 6</b> — first Ampd review (PDF): July compromise, "amazon" keyword block, Maximize Clicks structure, unattributed spend; AACOS definition and mirror-coverage traps fixed.</li>
+<li><b>Aug 13</b> — block diagnosed as Google-side and CGK-specific; "raise bids 30%" declined; four Core KWs campaigns built.</li>
+<li><b>Aug 24</b> — "Ampd vs Website" audit (18 confirmed findings, ranked list).</li>
+<li><b>Aug 26</b> — audit executed (24 plans, 270 changes, five owner overrides).</li>
+<li><b>Sep 3</b> — this weekly review (v2, readability pass) and the Beckham PixelMe rebuild.</li>
+</ul>
+<h3>Full Ampd campaign table (stable window, all campaigns above $40)</h3>
+{table(['Campaign<br><span class="id">id · strategy · budget/day</span>', 'Stable spend', 'Stable AACOS', 'Last-30 spend', 'Last-30 AACOS', 'Last-14 AACOS'],
+   [[f'{names.get(cid, r["campaign_name"].replace("[Ampd] ","").replace("amazon.com ","")[:44])}<br><span class="id">{cid} · {(r.get("strategy") or "").replace("TARGET_SPEND","Max Clicks").replace("MANUAL_CPC","Manual CPC")} · {money(r.get("budget"))}</span>',
+     money(fix[cid][0][0] if cid in fix else r['cost']), pct(fix[cid][0][1] if cid in fix else r.get('aacos')) if (cid in fix or r.get('aacos') is not None) else '—',
+     money(fix[cid][1][0] if cid in fix else (l30.get(cid) or {}).get('cost')), pct(fix[cid][1][1] if cid in fix else (l30.get(cid) or {}).get('aacos')) if (cid in fix or (l30.get(cid) or {}).get('aacos') is not None) else '—',
+     pct(fix[cid][2][1] if cid in fix else (l14.get(cid) or {}).get('aacos')) if (cid in fix or (l14.get(cid) or {}).get('aacos') is not None) else '—']
+    for cid, r in sorted(st.items(), key=lambda kv: -float(kv[1]['cost'])) if float(r['cost']) >= 40], aligns=['l','r','r','r','r','r'], cls='full')}
 </body></html>"""
-
-out_html = os.path.join(S, 'report.html')
-open(out_html, 'w').write(html)
-print('html written', len(html))
+open(os.path.join(S, 'report_v2.html'), 'w').write(html); print('html v2 written', len(html))

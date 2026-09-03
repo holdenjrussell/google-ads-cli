@@ -144,18 +144,27 @@ env -u NODE_OPTIONS /usr/bin/python3 pdf.py report.html report.pdf   # Playwrigh
 pdftoppm -r 55 -png report.pdf qa/p && ls qa            # look at every page before shipping
 ```
 
-Document structure (keep it — the owner approved this order): header with
-windows + sources + freshness → 4 KPI tiles (one per lane) → executive summary
-(7 bullets + net-of-actions callout) → §1 Ampd lane (windows table, daily chart,
-keyword class, campaign table with stable/L30/L14 and a verdict per row,
-keyword concentration, early read on last week's changes) → §2 website lane
-(KPI tiles, daily chart, campaign table with Google vs Northbeam, search
-terms) → §3 Beckham Home (PixelMe product table, chart, campaign table with
-link status) → §4 SafeRest → §5 account changelog for the window → §6 ranked
-action list (#, lane, campaign ids, action, where the change is made, expected
-effect, judge-by) → §7 open items that need a person → §8 Google
-recommendations stance → §9 analysis log → appendix (definitions, freshness,
-data fixes shipped).
+Document structure (v2, 2026-09-03 — the owner asked for concise and
+readable; keep it): logo + title + one-line scope and windows → 4 KPI tiles
+(one per lane, each with the number, its basis and the prior-period
+comparison) → **Read this first**: five bullets, one line each, then a
+net-of-actions callout → **Decisions I need from you**: a table of at most
+six rows (topic / what the data says / what I need from you) → a four-cell
+glossary (AACOS, ROAS and the Google-vs-Northbeam rule, Stable 30, ceiling
+vs bid / rank-limited) → §1 Amazon lane (windows table, daily chart, the
+"amazon" keyword table, a **verdict table** of campaigns above $150 with
+KEEP / WATCH / FIX / CUT / SCALE tags and a one-line reason, the scale set,
+an early read on last week's changes) → §2 website lane (tiles, chart, verdict
+table with Google beside Northbeam and the Last-7 fair comparison, three
+search-term bullets) → §3 Beckham (product verdict table, chart, "done this
+week" callout, two bullets) → §4 SafeRest (table, three bullets) → §5 **Ready
+to execute on your OK** (lane / one-line action, ~15 rows) → §6 account
+changes, highlights only (full changelog lives in Obsidian) → appendix
+(sources and freshness, data fixes, Google recommendations stance, analysis
+history, the full Ampd campaign table). Sections flow; only the appendix
+takes a page break. Plain words over jargon; every verdict is a tag plus a
+reason; campaign ids sit in small grey text under the name. Target ≤ 12 pages
+including the appendix.
 
 Every number carries source + window; nothing is estimated without a stated
 basis; no exclamation marks; logo on page 1 only.
