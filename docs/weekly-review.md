@@ -3,7 +3,7 @@
 The Wednesday review of every Google Ads account we run, delivered as a branded
 PDF to Slack `C0APU5A56F4` with Holden tagged. First edition 2026-09-03
 (`~/Reports/google-ads-weekly/CGK-Google-Ads-Weekly-Review-2026-09-03.pdf`).
-Owner-approved format; once stable it is scheduled through Hermes.
+Format v2 (the readability pass) was approved by the owner on 2026-09-03 ("pretty good, let's keep it"); keep its shape. Weekly scheduling through Hermes happens on the owner's word.
 
 ## 0. Read the logs before touching data (mandatory)
 
