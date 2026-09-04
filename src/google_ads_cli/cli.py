@@ -30,6 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 
@@ -83,6 +84,7 @@ PROFILE_ROOT = pathlib.Path(os.environ.get("GOOGLE_ADS_CLI_HOME", pathlib.Path.h
 CONFIG_DIR = pathlib.Path(os.environ.get("GOOGLE_ADS_CLI_CONFIG_DIR", PROFILE_ROOT)).expanduser()
 CONFIG_ENV_PATH = CONFIG_DIR / ".env"
 SCHEMA = "google_ads_tw"
+WAREHOUSE_WRITE_BATCH_SIZE = 1_000
 DEFAULT_API_VERSION = os.environ.get("GOOGLE_ADS_API_VERSION", "v24")
 REST_BASE = "https://googleads.googleapis.com"
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -150,6 +152,101 @@ def now_utc() -> dt.datetime:
 
 def jsonb(value: Any) -> str:
     return json_dumps(value if value is not None else {})
+
+
+class WarehouseBatchWriteError(RuntimeError):
+    """A bounded warehouse write failed without an automatic retry."""
+
+    def __init__(
+        self,
+        *,
+        operation: str,
+        batch_number: int,
+        batch_count: int,
+        batch_rows: int,
+        rows_confirmed: int,
+        total_rows: int,
+        cause_type: str | None = None,
+        sqlstate: str | None = None,
+    ) -> None:
+        self.operation = operation
+        self.batch_number = batch_number
+        self.batch_count = batch_count
+        self.batch_rows = batch_rows
+        self.rows_confirmed = rows_confirmed
+        self.total_rows = total_rows
+        self.cause_type = cause_type
+        self.sqlstate = sqlstate
+        cause_summary = f"; cause={cause_type}" if cause_type else ""
+        if sqlstate:
+            cause_summary += f" sqlstate={sqlstate}"
+        super().__init__(
+            f"{operation} batch {batch_number}/{batch_count} failed after "
+            f"{rows_confirmed}/{total_rows} rows were confirmed committed; "
+            f"the {batch_rows}-row failed batch has an unconfirmed commit state "
+            f"and was not retried automatically{cause_summary}"
+        )
+
+    def receipt(self) -> dict[str, Any]:
+        details = {
+            "operation": self.operation,
+            "batch_number": self.batch_number,
+            "batch_count": self.batch_count,
+            "batch_rows": self.batch_rows,
+            "rows_confirmed": self.rows_confirmed,
+            "total_rows": self.total_rows,
+            "automatic_retry": False,
+        }
+        if self.cause_type:
+            details["cause_type"] = self.cause_type
+        if self.sqlstate:
+            details["sqlstate"] = self.sqlstate
+        return details
+
+
+def write_warehouse_rows_in_batches(
+    rows: list[dict[str, Any]],
+    *,
+    statement: str,
+    parameterize: Callable[[dict[str, Any]], tuple[Any, ...]],
+    operation: str,
+) -> int:
+    """Upsert rows in deterministic, independently committed transactions.
+
+    A fresh connection is used for every batch.  Only batches whose connection
+    context exited normally count as confirmed.  The failed batch is never
+    retried here because a lost connection can make its commit outcome
+    unknowable; every caller uses an idempotent ON CONFLICT statement, so the
+    operator can safely rerun the surface after the failure receipt is stored.
+    """
+
+    if not rows:
+        return 0
+    batch_size = WAREHOUSE_WRITE_BATCH_SIZE
+    if batch_size < 1:
+        raise ValueError("WAREHOUSE_WRITE_BATCH_SIZE must be at least 1")
+    batch_count = (len(rows) + batch_size - 1) // batch_size
+    rows_confirmed = 0
+    for batch_number, start in enumerate(range(0, len(rows), batch_size), start=1):
+        batch_rows = rows[start : start + batch_size]
+        params = [parameterize(row) for row in batch_rows]
+        try:
+            with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
+                cur.executemany(statement, params)
+        except Exception as exc:  # noqa: BLE001 - preserve any driver/commit failure as a receipt
+            sqlstate = getattr(exc, "sqlstate", None)
+            raise WarehouseBatchWriteError(
+                operation=operation,
+                batch_number=batch_number,
+                batch_count=batch_count,
+                batch_rows=len(batch_rows),
+                rows_confirmed=rows_confirmed,
+                total_rows=len(rows),
+                cause_type=exc.__class__.__name__,
+                sqlstate=str(sqlstate) if sqlstate else None,
+            ) from exc
+        rows_confirmed += len(batch_rows)
+    return rows_confirmed
 
 
 def snake_to_camel(value: str) -> str:
@@ -1799,8 +1896,9 @@ def store_gaql_rows(
 ) -> int:
     if not rows:
         return 0
-    params = [
-        (
+
+    def parameters(row: dict[str, Any]) -> tuple[Any, ...]:
+        return (
             run_id,
             customer,
             query_name,
@@ -1810,24 +1908,23 @@ def store_gaql_rows(
             query,
             jsonb(row),
         )
-        for row in rows
-    ]
-    with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
-        cur.executemany(
-            """
-            INSERT INTO google_gaql_rows (
-                sync_run_id, customer_id, query_name, source_resource,
-                report_date, row_hash, query, row_json, fetched_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
-            ON CONFLICT (customer_id, query_name, row_hash) DO UPDATE SET
-                sync_run_id = excluded.sync_run_id,
-                row_json = excluded.row_json,
-                fetched_at = now()
-            """,
-            params,
+
+    return write_warehouse_rows_in_batches(
+        rows,
+        operation="store_gaql_rows",
+        parameterize=parameters,
+        statement="""
+        INSERT INTO google_gaql_rows (
+            sync_run_id, customer_id, query_name, source_resource,
+            report_date, row_hash, query, row_json, fetched_at
         )
-    return len(rows)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+        ON CONFLICT (customer_id, query_name, row_hash) DO UPDATE SET
+            sync_run_id = excluded.sync_run_id,
+            row_json = excluded.row_json,
+            fetched_at = now()
+        """,
+    )
 
 
 def collect_resource_names(value: Any, found: list[str]) -> None:
@@ -1869,8 +1966,9 @@ def store_core_generic_rows(
 ) -> int:
     if not rows:
         return 0
-    params = [
-        (
+
+    def parameters(row: dict[str, Any]) -> tuple[Any, ...]:
+        return (
             customer,
             surface,
             core_entity_key(surface, row),
@@ -1881,29 +1979,28 @@ def store_core_generic_rows(
             jsonb(core_selected_fields(row)),
             jsonb(row),
         )
-        for row in rows
-    ]
-    with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
-        cur.executemany(
-            """
-            INSERT INTO google_core_generic (
-                customer_id, surface, entity_key, query_name, source_resource,
-                row_hash, query, selected_fields, row_json, fetched_at
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now())
-            ON CONFLICT (customer_id, surface, entity_key)
-            DO UPDATE SET
-                query_name = excluded.query_name,
-                source_resource = excluded.source_resource,
-                row_hash = excluded.row_hash,
-                query = excluded.query,
-                selected_fields = excluded.selected_fields,
-                row_json = excluded.row_json,
-                fetched_at = now()
-            """,
-            params,
+
+    return write_warehouse_rows_in_batches(
+        rows,
+        operation="store_core_generic_rows",
+        parameterize=parameters,
+        statement="""
+        INSERT INTO google_core_generic (
+            customer_id, surface, entity_key, query_name, source_resource,
+            row_hash, query, selected_fields, row_json, fetched_at
         )
-    return len(params)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now())
+        ON CONFLICT (customer_id, surface, entity_key)
+        DO UPDATE SET
+            query_name = excluded.query_name,
+            source_resource = excluded.source_resource,
+            row_hash = excluded.row_hash,
+            query = excluded.query,
+            selected_fields = excluded.selected_fields,
+            row_json = excluded.row_json,
+            fetched_at = now()
+        """,
+    )
 
 
 def extract_id(resource_name: Any) -> str:
@@ -1962,11 +2059,71 @@ def upsert_core_ad_rows(customer: str, rows: list[dict[str, Any]]) -> int:
     return len(params)
 
 
+def upsert_core_keyword_rows(customer: str, rows: list[dict[str, Any]]) -> int:
+    valid_rows = [
+        row
+        for row in rows
+        if str_or_empty(
+            (row.get("adGroupCriterion") or {}).get("criterionId")
+            or extract_id((row.get("adGroupCriterion") or {}).get("resourceName"))
+        )
+    ]
+    if not valid_rows:
+        return 0
+
+    def parameters(row: dict[str, Any]) -> tuple[Any, ...]:
+        criterion = row.get("adGroupCriterion") or {}
+        keyword = criterion.get("keyword") or {}
+        return (
+            customer,
+            str_or_empty(get_path(row, "ad_group.id")),
+            str_or_empty(criterion.get("criterionId") or extract_id(criterion.get("resourceName"))),
+            str_or_empty(get_path(row, "campaign.id")),
+            keyword.get("text"),
+            keyword.get("matchType"),
+            criterion.get("status"),
+            criterion.get("negative"),
+            int_or_none(
+                criterion.get("qualityInfo", {}).get("qualityScore")
+                if isinstance(criterion.get("qualityInfo"), dict)
+                else None
+            ),
+            jsonb(criterion.get("finalUrls") or []),
+            jsonb(criterion),
+        )
+
+    return write_warehouse_rows_in_batches(
+        valid_rows,
+        operation="upsert_core_keyword_rows",
+        parameterize=parameters,
+        statement="""
+        INSERT INTO google_keywords (
+            customer_id, ad_group_id, criterion_id, campaign_id, text,
+            match_type, status, negative, quality_score, final_urls,
+            raw, fetched_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now())
+        ON CONFLICT (customer_id, ad_group_id, criterion_id) DO UPDATE SET
+            campaign_id = excluded.campaign_id,
+            text = excluded.text,
+            match_type = excluded.match_type,
+            status = excluded.status,
+            negative = excluded.negative,
+            quality_score = excluded.quality_score,
+            final_urls = excluded.final_urls,
+            raw = excluded.raw,
+            fetched_at = now()
+        """,
+    )
+
+
 def upsert_core_rows(customer: str, surface: str, rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0
     if surface == "ad":
         return upsert_core_ad_rows(customer, rows)
+    if surface == "keyword":
+        return upsert_core_keyword_rows(customer, rows)
     with connect(schema=SCHEMA, application_name="google-ads-warehouse") as conn, conn.cursor() as cur:
         for row in rows:
             if surface == "customer":
@@ -2123,46 +2280,6 @@ def upsert_core_rows(customer: str, surface: str, rows: list[dict[str, Any]]) ->
                         int_or_none(ad_group.get("targetCpaMicros")),
                         num_or_none(ad_group.get("targetRoas")),
                         jsonb(ad_group),
-                    ),
-                )
-            elif surface == "keyword":
-                criterion = row.get("adGroupCriterion") or {}
-                keyword = criterion.get("keyword") or {}
-                criterion_id = str_or_empty(criterion.get("criterionId") or extract_id(criterion.get("resourceName")))
-                ad_group_id = str_or_empty(get_path(row, "ad_group.id"))
-                if not criterion_id:
-                    continue
-                cur.execute(
-                    """
-                    INSERT INTO google_keywords (
-                        customer_id, ad_group_id, criterion_id, campaign_id, text,
-                        match_type, status, negative, quality_score, final_urls,
-                        raw, fetched_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now())
-                    ON CONFLICT (customer_id, ad_group_id, criterion_id) DO UPDATE SET
-                        campaign_id = excluded.campaign_id,
-                        text = excluded.text,
-                        match_type = excluded.match_type,
-                        status = excluded.status,
-                        negative = excluded.negative,
-                        quality_score = excluded.quality_score,
-                        final_urls = excluded.final_urls,
-                        raw = excluded.raw,
-                        fetched_at = now()
-                    """,
-                    (
-                        customer,
-                        ad_group_id,
-                        criterion_id,
-                        str_or_empty(get_path(row, "campaign.id")),
-                        keyword.get("text"),
-                        keyword.get("matchType"),
-                        criterion.get("status"),
-                        criterion.get("negative"),
-                        int_or_none(criterion.get("qualityInfo", {}).get("qualityScore") if isinstance(criterion.get("qualityInfo"), dict) else None),
-                        jsonb(criterion.get("finalUrls") or []),
-                        jsonb(criterion),
                     ),
                 )
             elif surface == "asset":
@@ -4935,6 +5052,7 @@ def cmd_sync_core(args: argparse.Namespace) -> int:
     rows_fetched = 0
     rows_written = 0
     errors = 0
+    write_failures: list[dict[str, Any]] = []
     try:
         for surface in surfaces:
             if surface not in CORE_QUERIES:
@@ -4945,6 +5063,7 @@ def cmd_sync_core(args: argparse.Namespace) -> int:
             normalized = normalize_query(query.replace("{customer_id}", customer))
             try:
                 rows = search_gaql(normalized, customer=customer, run_id=run_id, query_name=f"core_{surface}", max_pages=args.max_pages)
+                rows_fetched += len(rows)
                 store_gaql_rows(run_id, customer=customer, query_name=f"core_{surface}", source_resource=source_resource, query=normalized, rows=rows)
                 generic_written = store_core_generic_rows(
                     customer=customer,
@@ -4956,19 +5075,37 @@ def cmd_sync_core(args: argparse.Namespace) -> int:
                 )
                 normalized_written = upsert_core_rows(customer, surface, rows)
                 written = max(generic_written, normalized_written)
-                rows_fetched += len(rows)
                 rows_written += written
                 print(f"{surface}: fetched={len(rows)} written={written} generic={generic_written}")
             except Exception as exc:  # noqa: BLE001
                 errors += 1
+                if isinstance(exc, WarehouseBatchWriteError):
+                    write_failures.append({"surface": surface, **exc.receipt()})
                 print(f"{surface}: ERROR {exc}", file=sys.stderr)
                 if not args.keep_going:
                     raise
-        run_finish(run_id, "success" if errors == 0 else "partial", rows_fetched=rows_fetched, rows_written=rows_written, errors=errors)
-        return 0 if errors == 0 else 2
     except Exception:
-        run_finish(run_id, "error", rows_fetched=rows_fetched, rows_written=rows_written, errors=errors + 1)
+        run_finish(
+            run_id,
+            "error",
+            rows_fetched=rows_fetched,
+            rows_written=rows_written,
+            errors=max(errors, 1),
+            metadata={"warehouse_write_failures": write_failures} if write_failures else None,
+        )
         raise
+    # Keep the terminal success/partial write outside the processing handler.
+    # If its commit outcome is uncertain, a second "error" update must not
+    # overwrite a receipt that may already have committed successfully.
+    run_finish(
+        run_id,
+        "success" if errors == 0 else "partial",
+        rows_fetched=rows_fetched,
+        rows_written=rows_written,
+        errors=errors,
+        metadata={"warehouse_write_failures": write_failures} if write_failures else None,
+    )
+    return 0 if errors == 0 else 2
 
 
 def date_range_from_args(args: argparse.Namespace) -> tuple[str, str]:

@@ -43,6 +43,27 @@ It does not include customer rows, raw API payloads, tokens, or account IDs.
   `google_attribution_level_daily_imports`: optional third-party attribution
   imports for reporting
 
+## Large sync writes
+
+GAQL rows, generic core rows, and normalized keyword rows are upserted in
+deterministic batches of 1,000. Each batch uses a fresh Postgres connection and
+commits independently, which bounds transaction size and connection lifetime
+for large surfaces such as `keyword`.
+
+The writer never automatically retries a failed batch. A connection loss while
+committing can leave that batch's outcome unknown, so `sync-core` records an
+error receipt with the operation, failed batch, and number of rows confirmed by
+prior batches. All of these writes use stable conflict keys, making a full
+surface rerun the safe recovery path:
+
+```bash
+gads sync-core --customer-id <customer-id> --surface keyword
+```
+
+Only a completely stored surface contributes to the command's `rows_written`.
+Fetched rows and bounded-write failure details remain in `google_sync_runs`,
+and the command exits nonzero instead of reporting success.
+
 ## Required Extensions
 
 No non-core Postgres extensions are required.

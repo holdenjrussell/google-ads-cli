@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import importlib
+import json
 import pathlib
 import sys
 import types
 from argparse import Namespace
+
+import pytest
 
 
 def test_parser_exposes_core_command_surface():
@@ -342,6 +345,19 @@ def test_upsert_core_rows_batches_ad_rows(monkeypatch):
     executemany_calls = [call for call in calls if call[0] == "executemany"]
     assert len(executemany_calls) == 1
     assert len(executemany_calls[0][2]) == 2
+    assert [params[:4] for params in executemany_calls[0][2]] == [
+        ("123", "22", "33", "11"),
+        ("123", "22", "44", "11"),
+    ]
+    assert executemany_calls[0][2][0][4:10] == (
+        "customers/123/ads/33",
+        "Ad 33",
+        "ENABLED",
+        "RESPONSIVE_SEARCH_AD",
+        '["https://example.com"]',
+        "example.com",
+    )
+    assert executemany_calls[0][2][0][10] == module.jsonb(rows[0]["adGroupAd"])
     assert not [
         call
         for call in calls
@@ -398,6 +414,19 @@ def test_store_core_generic_rows_batches_rows(monkeypatch):
     executemany_calls = [call for call in calls if call[0] == "executemany"]
     assert len(executemany_calls) == 1
     assert len(executemany_calls[0][2]) == 2
+    first_params = executemany_calls[0][2][0]
+    assert first_params[:2] == ("123", "campaign")
+    assert first_params[2] == module.core_entity_key("campaign", rows[0])
+    assert first_params[3:7] == (
+        "core_campaign",
+        "campaign",
+        module.row_hash(rows[0], "core_campaign"),
+        "select campaign.id from campaign",
+    )
+    assert first_params[7:] == (
+        module.jsonb(module.core_selected_fields(rows[0])),
+        module.jsonb(rows[0]),
+    )
     assert not [
         call
         for call in calls
@@ -517,8 +546,347 @@ def test_store_gaql_rows_batches_rows(monkeypatch):
     executemany_calls = [call for call in calls if call[0] == "executemany"]
     assert len(executemany_calls) == 1
     assert len(executemany_calls[0][2]) == 2
+    first_params = executemany_calls[0][2][0]
+    assert first_params == (
+        "run-1",
+        "123",
+        "core_campaign",
+        "campaign",
+        None,
+        module.row_hash(rows[0], "core_campaign"),
+        "select campaign.id from campaign",
+        module.jsonb(rows[0]),
+    )
     assert not [
         call
         for call in calls
         if call[0] == "execute" and "INSERT INTO google_gaql_rows" in call[1]
     ]
+
+
+def test_large_gaql_and_generic_writes_use_fresh_bounded_transactions(monkeypatch):
+    module = importlib.import_module("google_ads_cli.cli")
+    calls = []
+    commits = []
+
+    class FakeCursor:
+        def __init__(self, connection_number):
+            self.connection_number = connection_number
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def executemany(self, statement, params_seq):
+            calls.append((self.connection_number, statement, list(params_seq)))
+
+    class FakeConnection:
+        def __init__(self, connection_number):
+            self.connection_number = connection_number
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            assert exc_type is None
+            commits.append(self.connection_number)
+            return False
+
+        def cursor(self):
+            return FakeCursor(self.connection_number)
+
+    def fake_connect(**kwargs):
+        assert kwargs == {
+            "schema": module.SCHEMA,
+            "application_name": "google-ads-warehouse",
+        }
+        return FakeConnection(len(calls) + 1)
+
+    monkeypatch.setattr(module, "WAREHOUSE_WRITE_BATCH_SIZE", 2)
+    monkeypatch.setattr(module, "connect", fake_connect)
+    rows = [
+        {"campaign": {"id": str(index), "resourceName": f"customers/123/campaigns/{index}"}}
+        for index in range(5)
+    ]
+
+    assert (
+        module.store_gaql_rows(
+            "run-1",
+            customer="123",
+            query_name="core_campaign",
+            source_resource="campaign",
+            query="select campaign.id from campaign",
+            rows=rows,
+        )
+        == 5
+    )
+    assert (
+        module.store_core_generic_rows(
+            customer="123",
+            surface="campaign",
+            query_name="core_campaign",
+            source_resource="campaign",
+            query="select campaign.id from campaign",
+            rows=rows,
+        )
+        == 5
+    )
+
+    assert [len(call[2]) for call in calls] == [2, 2, 1, 2, 2, 1]
+    assert commits == [1, 2, 3, 4, 5, 6]
+    assert all("ON CONFLICT" in call[1] for call in calls)
+
+
+def test_large_keyword_write_uses_bounded_executemany(monkeypatch):
+    module = importlib.import_module("google_ads_cli.cli")
+    calls = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement, params=None):
+            calls.append(("execute", statement, params))
+
+        def executemany(self, statement, params_seq):
+            calls.append(("executemany", statement, list(params_seq)))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+    monkeypatch.setattr(module, "WAREHOUSE_WRITE_BATCH_SIZE", 2)
+    monkeypatch.setattr(module, "connect", lambda **kwargs: FakeConnection())
+    rows = [
+        {
+            "campaign": {"id": "11"},
+            "adGroup": {"id": "22"},
+            "adGroupCriterion": {
+                "resourceName": f"customers/123/adGroupCriteria/22~{index}",
+                "criterionId": str(index),
+                "status": "ENABLED",
+                "negative": False,
+                "keyword": {"text": f"keyword {index}", "matchType": "EXACT"},
+                "qualityInfo": {"qualityScore": 8},
+                "finalUrls": ["https://example.com"],
+            },
+        }
+        for index in range(1, 6)
+    ]
+
+    assert module.upsert_core_rows("123", "keyword", rows) == 5
+    executemany_calls = [call for call in calls if call[0] == "executemany"]
+    assert [len(call[2]) for call in executemany_calls] == [2, 2, 1]
+    assert all("INSERT INTO google_keywords" in call[1] for call in executemany_calls)
+    assert executemany_calls[0][2][0] == (
+        "123",
+        "22",
+        "1",
+        "11",
+        "keyword 1",
+        "EXACT",
+        "ENABLED",
+        False,
+        8,
+        '["https://example.com"]',
+        module.jsonb(rows[0]["adGroupCriterion"]),
+    )
+    assert not [call for call in calls if call[0] == "execute"]
+
+
+def test_batch_commit_failure_stops_without_retry_and_reports_boundary(monkeypatch):
+    module = importlib.import_module("google_ads_cli.cli")
+    calls = []
+    committed = []
+
+    class FakeAdminShutdown(Exception):
+        sqlstate = "57P01"
+
+    class FakeCursor:
+        def __init__(self, connection_number):
+            self.connection_number = connection_number
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def executemany(self, statement, params_seq):
+            calls.append((self.connection_number, list(params_seq)))
+
+    class FakeConnection:
+        def __init__(self, connection_number):
+            self.connection_number = connection_number
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if self.connection_number == 2:
+                raise FakeAdminShutdown(
+                    "server closed postgresql://operator:super-secret@example/db "
+                    "while writing SELECT private_payload"
+                )
+            committed.append(self.connection_number)
+            return False
+
+        def cursor(self):
+            return FakeCursor(self.connection_number)
+
+    def fake_connect(**kwargs):
+        return FakeConnection(len(calls) + 1)
+
+    monkeypatch.setattr(module, "WAREHOUSE_WRITE_BATCH_SIZE", 2)
+    monkeypatch.setattr(module, "connect", fake_connect)
+    rows = [
+        {"campaign": {"id": str(index), "resourceName": f"customers/123/campaigns/{index}"}}
+        for index in range(5)
+    ]
+
+    with pytest.raises(module.WarehouseBatchWriteError) as caught:
+        module.store_core_generic_rows(
+            customer="123",
+            surface="campaign",
+            query_name="core_campaign",
+            source_resource="campaign",
+            query="select campaign.id from campaign",
+            rows=rows,
+        )
+
+    assert committed == [1]
+    assert [len(call[1]) for call in calls] == [2, 2]
+    assert isinstance(caught.value.__cause__, FakeAdminShutdown)
+    assert caught.value.receipt() == {
+        "operation": "store_core_generic_rows",
+        "batch_number": 2,
+        "batch_count": 3,
+        "batch_rows": 2,
+        "rows_confirmed": 2,
+        "total_rows": 5,
+        "automatic_retry": False,
+        "cause_type": "FakeAdminShutdown",
+        "sqlstate": "57P01",
+    }
+    serialized_receipt = json.dumps(caught.value.receipt(), sort_keys=True)
+    assert len(serialized_receipt) < 512
+    assert "super-secret" not in serialized_receipt
+    assert "private_payload" not in serialized_receipt
+    assert "super-secret" not in str(caught.value)
+    assert "private_payload" not in str(caught.value)
+
+
+def test_sync_core_records_bounded_write_failure_without_false_success(monkeypatch):
+    module = importlib.import_module("google_ads_cli.cli")
+    starts = []
+    finishes = []
+    rows = [{"adGroupCriterion": {"criterionId": str(index)}} for index in range(3)]
+    failure = module.WarehouseBatchWriteError(
+        operation="store_gaql_rows",
+        batch_number=2,
+        batch_count=2,
+        batch_rows=1,
+        rows_confirmed=2,
+        total_rows=3,
+    )
+
+    def fail_store(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(module, "ensure_schema", lambda: None)
+    monkeypatch.setattr(module, "customer_id", lambda value: value)
+    monkeypatch.setattr(
+        module,
+        "run_start",
+        lambda *args, **kwargs: starts.append((args, kwargs)) or "run-1",
+    )
+    monkeypatch.setattr(module, "search_gaql", lambda *args, **kwargs: rows)
+    monkeypatch.setattr(module, "store_gaql_rows", fail_store)
+    monkeypatch.setattr(
+        module,
+        "store_core_generic_rows",
+        lambda **kwargs: pytest.fail("generic write must not run after GAQL failure"),
+    )
+    monkeypatch.setattr(
+        module,
+        "upsert_core_rows",
+        lambda *args, **kwargs: pytest.fail("normalized write must not run after GAQL failure"),
+    )
+    monkeypatch.setattr(
+        module,
+        "run_finish",
+        lambda run_id, status, **kwargs: finishes.append((run_id, status, kwargs)),
+    )
+
+    with pytest.raises(module.WarehouseBatchWriteError):
+        module.cmd_sync_core(
+            Namespace(
+                customer_id="123",
+                surface="keyword",
+                max_pages=None,
+                keep_going=False,
+            )
+        )
+
+    assert starts == [(('sync-core', '123', {'surfaces': ['keyword']}), {})]
+    assert finishes == [
+        (
+            "run-1",
+            "error",
+            {
+                "rows_fetched": 3,
+                "rows_written": 0,
+                "errors": 1,
+                "metadata": {
+                    "warehouse_write_failures": [
+                        {"surface": "keyword", **failure.receipt()}
+                    ]
+                },
+            },
+        )
+    ]
+
+
+def test_sync_core_finish_failure_does_not_issue_error_overwrite(monkeypatch):
+    module = importlib.import_module("google_ads_cli.cli")
+    finishes = []
+    rows = [{"campaign": {"id": "1"}}]
+
+    def fail_finish(run_id, status, **kwargs):
+        finishes.append((run_id, status, kwargs))
+        raise RuntimeError("receipt connection outcome unknown")
+
+    monkeypatch.setattr(module, "ensure_schema", lambda: None)
+    monkeypatch.setattr(module, "customer_id", lambda value: value)
+    monkeypatch.setattr(module, "run_start", lambda *args, **kwargs: "run-1")
+    monkeypatch.setattr(module, "search_gaql", lambda *args, **kwargs: rows)
+    monkeypatch.setattr(module, "store_gaql_rows", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(module, "store_core_generic_rows", lambda **kwargs: 1)
+    monkeypatch.setattr(module, "upsert_core_rows", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(module, "run_finish", fail_finish)
+
+    with pytest.raises(RuntimeError, match="receipt connection outcome unknown"):
+        module.cmd_sync_core(
+            Namespace(
+                customer_id="123",
+                surface="campaign",
+                max_pages=None,
+                keep_going=False,
+            )
+        )
+
+    assert len(finishes) == 1
+    assert finishes[0][0:2] == ("run-1", "success")
+    assert finishes[0][2]["rows_fetched"] == 1
+    assert finishes[0][2]["rows_written"] == 1
