@@ -6,8 +6,8 @@ from ampd_cli import config
 import psycopg2, psycopg2.extras
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 conn = psycopg2.connect(config.pg_dsn()); conn.set_session(readonly=True, autocommit=True)
-W = {'L30':('2026-08-04','2026-09-02'),'P30':('2026-07-05','2026-08-03'),'STABLE':('2026-07-21','2026-08-19'),
-     'L14':('2026-08-20','2026-09-02'),'P14':('2026-08-06','2026-08-19')}
+W = {'L30':('2026-08-06','2026-09-04'),'P30':('2026-07-07','2026-08-05'),'STABLE':('2026-07-24','2026-08-22'),
+     'L14':('2026-08-22','2026-09-04'),'P14':('2026-08-08','2026-08-21')}
 WIN_VALUES = "(VALUES " + ",".join(f"('{k}','{s}'::date,'{e}'::date)" for k,(s,e) in W.items()) + ") w(win,s,e)"
 def conv(o):
     if isinstance(o, decimal.Decimal): return float(o)
@@ -34,19 +34,19 @@ LANE = """CASE WHEN campaign_name ILIKE '[ampd]%%' THEN 'ampd' WHEN campaign_nam
 
 q('lane_windows', f"""
 WITH c AS (SELECT report_date, campaign_id, campaign_name, cost_micros/1e6 AS spend, impressions, clicks, conversions, conversions_value, {LANE} AS lane
-  FROM google_ads_tw.google_performance_daily WHERE customer_id='7304176160' AND level='campaign' AND report_date BETWEEN '2026-07-05' AND '2026-09-02')
+  FROM google_ads_tw.google_performance_daily WHERE customer_id='7304176160' AND level='campaign' AND report_date BETWEEN '2026-07-07' AND '2026-09-04')
 SELECT w.win, lane, ROUND(SUM(spend)::numeric,2) spend, SUM(impressions) impr, SUM(clicks) clicks, ROUND(SUM(conversions)::numeric,1) conv, ROUND(SUM(conversions_value)::numeric,2) conv_value,
   COUNT(DISTINCT campaign_id) FILTER (WHERE spend>0) campaigns
 FROM c JOIN {WIN_VALUES} ON report_date BETWEEN w.s AND w.e GROUP BY 1,2 ORDER BY 1,2""", show=30)
 
 q('cgk_daily_lane', f"""
 SELECT report_date::text d, {LANE} AS lane, ROUND(SUM(cost_micros)/1e6::numeric,2) spend, SUM(clicks) clicks, ROUND(SUM(conversions)::numeric,1) conv, ROUND(SUM(conversions_value)::numeric,2) conv_value
-FROM google_ads_tw.google_performance_daily WHERE customer_id='7304176160' AND level='campaign' AND report_date BETWEEN '2026-06-01' AND '2026-09-02' GROUP BY 1,2 ORDER BY 1,2""", show=6)
+FROM google_ads_tw.google_performance_daily WHERE customer_id='7304176160' AND level='campaign' AND report_date BETWEEN '2026-06-01' AND '2026-09-04' GROUP BY 1,2 ORDER BY 1,2""", show=6)
 
 q('ampd_daily', """
 SELECT date::text d, ROUND(SUM(google_cost)::numeric,2) cost, ROUND(SUM(amazon_revenue)::numeric,2) rev, ROUND(SUM(brand_referral_bonus)::numeric,2) brb,
   SUM(amazon_conversions) conv, SUM(clicks) clicks, ROUND(SUM(google_cost) FILTER (WHERE NOT has_attribution)::numeric,2) unattributed_cost
-FROM ampd.campaign_daily_complete WHERE date BETWEEN '2026-06-01' AND '2026-09-02' GROUP BY 1 ORDER BY 1""", show=8)
+FROM ampd.campaign_daily_complete WHERE date BETWEEN '2026-06-01' AND '2026-09-04' GROUP BY 1 ORDER BY 1""", show=8)
 
 q('ampd_campaigns', f"""
 WITH b AS (SELECT c.campaign_id, c.name, c.status, c.bidding_strategy_type, cb.amount_micros/1e6 AS budget
@@ -65,21 +65,21 @@ q('kw_class_weekly', """
 SELECT (date_trunc('week', date))::date::text wk, is_amazon_keyword, ROUND(SUM(cost)::numeric,0) cost, ROUND(SUM(revenue)::numeric,0) rev, ROUND(SUM(brand_referral_bonus)::numeric,0) brb,
   SUM(clicks) clicks, SUM(impressions) impr, SUM(conversions) conv, COUNT(DISTINCT keyword) FILTER (WHERE impressions>0) kws_serving,
   CASE WHEN SUM(revenue)>0 THEN ROUND(((SUM(cost)-SUM(brand_referral_bonus))/SUM(revenue))::numeric,3) END aacos
-FROM ampd.keyword_daily_v WHERE date BETWEEN '2026-06-29' AND '2026-09-01' GROUP BY 1,2 ORDER BY 1,2""", show=40)
+FROM ampd.keyword_daily_v WHERE date BETWEEN '2026-06-29' AND '2026-09-04' GROUP BY 1,2 ORDER BY 1,2""", show=40)
 
 q('kw_class_daily_recent', """
 SELECT date::text d, is_amazon_keyword, ROUND(SUM(cost)::numeric,0) cost, SUM(impressions) impr, SUM(clicks) clicks, ROUND(SUM(revenue)::numeric,0) rev, COUNT(DISTINCT keyword) FILTER (WHERE impressions>0) kws
-FROM ampd.keyword_daily_v WHERE date BETWEEN '2026-08-15' AND '2026-09-01' GROUP BY 1,2 ORDER BY 1,2""", show=40)
+FROM ampd.keyword_daily_v WHERE date BETWEEN '2026-08-17' AND '2026-09-04' GROUP BY 1,2 ORDER BY 1,2""", show=40)
 
 q('ampd_kw_top_stable', """
 SELECT campaign_name, keyword, is_amazon_keyword amz, ROUND(SUM(cost)::numeric,0) cost, ROUND(SUM(revenue)::numeric,0) rev, ROUND(SUM(brand_referral_bonus)::numeric,0) brb, SUM(clicks) clicks, SUM(conversions) conv,
   CASE WHEN SUM(revenue)>0 THEN ROUND(((SUM(cost)-SUM(brand_referral_bonus))/SUM(revenue))::numeric,3) END aacos, ROUND((SUM(cost)/NULLIF(SUM(clicks),0))::numeric,2) cpc
-FROM ampd.keyword_daily_v WHERE date BETWEEN '2026-07-21' AND '2026-08-19' GROUP BY 1,2,3 HAVING SUM(cost)>=150 ORDER BY cost DESC LIMIT 60""", show=60)
+FROM ampd.keyword_daily_v WHERE date BETWEEN '2026-07-24' AND '2026-08-22' GROUP BY 1,2,3 HAVING SUM(cost)>=150 ORDER BY cost DESC LIMIT 60""", show=60)
 
 q('ampd_kw_top_l30', """
 SELECT campaign_name, keyword, is_amazon_keyword amz, ROUND(SUM(cost)::numeric,0) cost, ROUND(SUM(revenue)::numeric,0) rev, ROUND(SUM(brand_referral_bonus)::numeric,0) brb, SUM(clicks) clicks, SUM(conversions) conv,
   CASE WHEN SUM(revenue)>0 THEN ROUND(((SUM(cost)-SUM(brand_referral_bonus))/SUM(revenue))::numeric,3) END aacos, ROUND((SUM(cost)/NULLIF(SUM(clicks),0))::numeric,2) cpc
-FROM ampd.keyword_daily_v WHERE date BETWEEN '2026-08-04' AND '2026-09-01' GROUP BY 1,2,3 HAVING SUM(cost)>=150 ORDER BY cost DESC LIMIT 60""", show=60)
+FROM ampd.keyword_daily_v WHERE date BETWEEN '2026-08-06' AND '2026-09-04' GROUP BY 1,2,3 HAVING SUM(cost)>=150 ORDER BY cost DESC LIMIT 60""", show=60)
 
 q('website_campaigns', f"""
 WITH b AS (SELECT c.campaign_id, c.name, c.status, c.advertising_channel_type ch, c.advertising_channel_sub_type sub, c.bidding_strategy_type strat, cb.amount_micros/1e6 AS budget,
@@ -113,21 +113,21 @@ GROUP BY 1,2,3,4,5,6 ORDER BY 1,2,3,4,5,6""", show=80)
 
 q('nb_dtc_platforms', """
 SELECT platform_norm, ROUND(SUM(spend)::numeric,0) spend, ROUND(SUM(rev)::numeric,0) rev, SUM(transactions) txns
-FROM northbeam.export_daily WHERE day BETWEEN '2026-08-04' AND '2026-09-02' AND accounting_mode='accrual' AND attribution_model_id='northbeam_custom' AND attribution_window='7'
+FROM northbeam.export_daily WHERE day BETWEEN '2026-08-06' AND '2026-09-04' AND accounting_mode='accrual' AND attribution_model_id='northbeam_custom' AND attribution_window='7'
   AND platform_norm NOT IN ('amazon','excluded') GROUP BY 1 ORDER BY 2 DESC""", show=20)
 
-q('search_terms_freshness', "SELECT customer_id, MAX(report_date) mx, MIN(report_date) mn, COUNT(*) n FROM google_ads_tw.google_search_terms WHERE report_date >= '2026-07-05' GROUP BY 1")
+q('search_terms_freshness', "SELECT customer_id, MAX(report_date) mx, MIN(report_date) mn, COUNT(*) n FROM google_ads_tw.google_search_terms WHERE report_date >= '2026-07-07' GROUP BY 1")
 
 q('website_st_waste', """
 WITH st AS (SELECT s.campaign_id, c.name campaign_name, s.search_term, SUM(s.cost_micros)/1e6 spend, SUM(clicks) clicks, SUM(conversions) conv, SUM(conversions_value) cv
   FROM google_ads_tw.google_search_terms s JOIN google_ads_tw.google_campaigns c ON c.campaign_id=s.campaign_id AND c.customer_id=s.customer_id
-  WHERE s.customer_id='7304176160' AND s.report_date BETWEEN '2026-08-04' AND '2026-09-02' AND NOT (c.name ILIKE '[ampd]%') GROUP BY 1,2,3)
+  WHERE s.customer_id='7304176160' AND s.report_date BETWEEN '2026-08-06' AND '2026-09-04' AND NOT (c.name ILIKE '[ampd]%') GROUP BY 1,2,3)
 SELECT campaign_name, search_term, ROUND(spend::numeric,2) spend, clicks, ROUND(conv::numeric,1) conv, ROUND(cv::numeric,0) cv FROM st WHERE spend>=40 AND conv<0.5 ORDER BY spend DESC LIMIT 40""", show=40)
 
 q('website_st_winners', """
 WITH st AS (SELECT s.campaign_id, c.name campaign_name, s.search_term, SUM(s.cost_micros)/1e6 spend, SUM(clicks) clicks, SUM(conversions) conv, SUM(conversions_value) cv
   FROM google_ads_tw.google_search_terms s JOIN google_ads_tw.google_campaigns c ON c.campaign_id=s.campaign_id AND c.customer_id=s.customer_id
-  WHERE s.customer_id='7304176160' AND s.report_date BETWEEN '2026-08-04' AND '2026-09-02' AND NOT (c.name ILIKE '[ampd]%') GROUP BY 1,2,3),
+  WHERE s.customer_id='7304176160' AND s.report_date BETWEEN '2026-08-06' AND '2026-09-04' AND NOT (c.name ILIKE '[ampd]%') GROUP BY 1,2,3),
 kw AS (SELECT DISTINCT lower(text) t FROM google_ads_tw.google_keywords WHERE customer_id='7304176160' AND match_type='EXACT' AND NOT negative AND status='ENABLED')
 SELECT campaign_name, search_term, ROUND(spend::numeric,2) spend, clicks, ROUND(conv::numeric,1) conv, ROUND(cv::numeric,0) cv, ROUND((cv/NULLIF(spend,0))::numeric,2) roas,
   EXISTS (SELECT 1 FROM kw WHERE kw.t=lower(st.search_term)) has_exact
@@ -136,21 +136,21 @@ FROM st WHERE conv>=2 AND cv/NULLIF(spend,0)>=2.5 ORDER BY cv DESC LIMIT 40""", 
 q('ampd_st_top', """
 SELECT c.name campaign_name, s.search_term, ROUND(SUM(s.cost_micros)/1e6::numeric,2) spend, SUM(clicks) clicks
 FROM google_ads_tw.google_search_terms s JOIN google_ads_tw.google_campaigns c ON c.campaign_id=s.campaign_id AND c.customer_id=s.customer_id
-WHERE s.customer_id='7304176160' AND s.report_date BETWEEN '2026-08-04' AND '2026-09-02' AND c.name ILIKE '[ampd]%' GROUP BY 1,2 HAVING SUM(s.cost_micros)/1e6>=60 ORDER BY spend DESC LIMIT 60""", show=60)
+WHERE s.customer_id='7304176160' AND s.report_date BETWEEN '2026-08-06' AND '2026-09-04' AND c.name ILIKE '[ampd]%' GROUP BY 1,2 HAVING SUM(s.cost_micros)/1e6>=60 ORDER BY spend DESC LIMIT 60""", show=60)
 
 q('change_events_summary', """
 SELECT customer_id, user_email, change_resource_type, COUNT(*) n, MIN(change_date_time)::date first, MAX(change_date_time)::date last
-FROM google_ads_tw.google_change_events WHERE change_date_time >= '2026-08-04' GROUP BY 1,2,3 ORDER BY 1,4 DESC""", show=40)
+FROM google_ads_tw.google_change_events WHERE change_date_time >= '2026-08-06' GROUP BY 1,2,3 ORDER BY 1,4 DESC""", show=40)
 
 q('change_events_detail', """
 SELECT customer_id, change_date_time::date d, user_email, change_resource_type ty, changed_fields::text cf,
   COALESCE(new_resource->'campaign'->>'name', new_resource->'campaignBudget'->>'name', new_resource->'adGroup'->>'name', old_resource->'campaign'->>'name') nm,
   LEFT(old_resource::text,160) oldv, LEFT(new_resource::text,160) newv
-FROM google_ads_tw.google_change_events WHERE change_date_time >= '2026-08-04' AND change_resource_type IN ('CAMPAIGN','CAMPAIGN_BUDGET') ORDER BY change_date_time""", show=0)
+FROM google_ads_tw.google_change_events WHERE change_date_time >= '2026-08-06' AND change_resource_type IN ('CAMPAIGN','CAMPAIGN_BUDGET') ORDER BY change_date_time""", show=0)
 
 q('ampd_change_log', """
 SELECT detected_at::date d, campaign_name, change_type, entity, old_value, new_value, source, source_detail, aacos_at_change
-FROM ampd.change_log WHERE detected_at >= '2026-08-04' ORDER BY detected_at""", show=0)
+FROM ampd.change_log WHERE detected_at >= '2026-08-06' ORDER BY detected_at""", show=0)
 
 for acct, nm, pm_acct in (('3818885747','beckham','6584ada2c23f9400099c4577'),('5590642315','saferest','65c508387f3d58000863f22a'),('8819867229','hotelsheets','65e5eb75ce951e00084c7645'),('6757430621','dtc_beckham',None),('2425709513','walmart',None)):
     q(f'{nm}_campaigns', f"""
@@ -175,7 +175,7 @@ q('pixelme_campaign_status', """
 SELECT a.name acct, cp.status, cp.imported, COUNT(*) n, ROUND(SUM(0)::numeric,0) z FROM pixelme.campaign_product cp JOIN pixelme.accounts a ON a.account_id=cp.account_id GROUP BY 1,2,3 ORDER BY 1,2""", show=30)
 q('pixelme_daily', """
 SELECT a.name acct, date::text d, ROUND(SUM(ad_cost)::numeric,0) cost, ROUND(SUM(revenue)::numeric,0) rev, SUM(purchases) purch
-FROM pixelme.product_daily d JOIN pixelme.accounts a ON a.account_id=d.account_id WHERE date BETWEEN '2026-07-05' AND '2026-09-02' GROUP BY 1,2 ORDER BY 1,2""", show=0)
+FROM pixelme.product_daily d JOIN pixelme.accounts a ON a.account_id=d.account_id WHERE date BETWEEN '2026-07-07' AND '2026-09-04' GROUP BY 1,2 ORDER BY 1,2""", show=0)
 
 q('recs', """
 SELECT customer_id, type, COUNT(*) n, COUNT(DISTINCT campaign_id) camps,
@@ -185,23 +185,29 @@ SELECT customer_id, type, COUNT(*) n, COUNT(DISTINCT campaign_id) camps,
 FROM google_ads_tw.google_recommendations WHERE NOT dismissed GROUP BY 1,2 ORDER BY 1, n DESC""", show=60)
 
 q('budget_util_l7', """
-WITH s AS (SELECT customer_id, campaign_id, campaign_name, SUM(cost_micros)/1e6/7 avg_daily FROM google_ads_tw.google_performance_daily WHERE level='campaign' AND report_date BETWEEN '2026-08-27' AND '2026-09-02' GROUP BY 1,2,3)
+WITH s AS (SELECT customer_id, campaign_id, campaign_name, SUM(cost_micros)/1e6/7 avg_daily FROM google_ads_tw.google_performance_daily WHERE level='campaign' AND report_date BETWEEN '2026-08-29' AND '2026-09-04' GROUP BY 1,2,3)
 SELECT s.customer_id, s.campaign_id, s.campaign_name, c.status, cb.amount_micros/1e6 budget, ROUND(avg_daily::numeric,2) avg_daily, ROUND((avg_daily/NULLIF(cb.amount_micros/1e6,0))::numeric,2) util
 FROM s JOIN google_ads_tw.google_campaigns c ON c.campaign_id=s.campaign_id AND c.customer_id=s.customer_id LEFT JOIN google_ads_tw.google_campaign_budgets cb ON cb.resource_name=c.campaign_budget AND cb.customer_id=c.customer_id
 WHERE c.status='ENABLED' AND avg_daily>0 ORDER BY util DESC NULLS LAST""", show=0)
 
 q('post_0826_early', """
 SELECT campaign_id, campaign_name,
-  ROUND(SUM(google_cost) FILTER (WHERE date BETWEEN '2026-08-12' AND '2026-08-25')::numeric,0) cost_pre, ROUND(SUM(amazon_revenue) FILTER (WHERE date BETWEEN '2026-08-12' AND '2026-08-25')::numeric,0) rev_pre,
-  CASE WHEN SUM(amazon_revenue) FILTER (WHERE date BETWEEN '2026-08-12' AND '2026-08-25')>0 THEN ROUND(((SUM(google_cost)-SUM(brand_referral_bonus)) FILTER (WHERE date BETWEEN '2026-08-12' AND '2026-08-25') / SUM(amazon_revenue) FILTER (WHERE date BETWEEN '2026-08-12' AND '2026-08-25'))::numeric,3) END aacos_pre,
-  ROUND(SUM(google_cost) FILTER (WHERE date BETWEEN '2026-08-27' AND '2026-09-01')::numeric,0) cost_post, ROUND(SUM(amazon_revenue) FILTER (WHERE date BETWEEN '2026-08-27' AND '2026-09-01')::numeric,0) rev_post,
-  CASE WHEN SUM(amazon_revenue) FILTER (WHERE date BETWEEN '2026-08-27' AND '2026-09-01')>0 THEN ROUND(((SUM(google_cost)-SUM(brand_referral_bonus)) FILTER (WHERE date BETWEEN '2026-08-27' AND '2026-09-01') / SUM(amazon_revenue) FILTER (WHERE date BETWEEN '2026-08-27' AND '2026-09-01'))::numeric,3) END aacos_post
-FROM ampd.campaign_daily_complete WHERE campaign_id IN ('23859376713','23864624639','21510061819','23576925357','24139372252','22821667433','23676906151','23350268344','22452315321','21083360054','19876543583','21839192355','23451576927','23461114981','24182840078','24177022254','24176957259','21736166343','24128873457','24139407325','24139378924')
-GROUP BY 1,2 ORDER BY cost_post DESC NULLS LAST""", show=30)
+  ROUND(SUM(CASE WHEN date BETWEEN '2026-08-12' AND '2026-08-25' THEN google_cost END)::numeric,0) cost_pre,
+  ROUND(SUM(CASE WHEN date BETWEEN '2026-08-12' AND '2026-08-25' THEN amazon_revenue END)::numeric,0) rev_pre,
+  CASE WHEN SUM(CASE WHEN date BETWEEN '2026-08-12' AND '2026-08-25' THEN amazon_revenue END)>0
+       THEN ROUND((SUM(CASE WHEN date BETWEEN '2026-08-12' AND '2026-08-25' THEN google_cost-brand_referral_bonus END)
+                 / SUM(CASE WHEN date BETWEEN '2026-08-12' AND '2026-08-25' THEN amazon_revenue END))::numeric,3) END aacos_pre,
+  ROUND(SUM(CASE WHEN date >= '2026-08-27' THEN google_cost END)::numeric,0) cost_post,
+  ROUND(SUM(CASE WHEN date >= '2026-08-27' THEN amazon_revenue END)::numeric,0) rev_post,
+  CASE WHEN SUM(CASE WHEN date >= '2026-08-27' THEN amazon_revenue END)>0
+       THEN ROUND((SUM(CASE WHEN date >= '2026-08-27' THEN google_cost-brand_referral_bonus END)
+                 / SUM(CASE WHEN date >= '2026-08-27' THEN amazon_revenue END))::numeric,3) END aacos_post_immature
+FROM ampd.campaign_daily_complete WHERE date BETWEEN '2026-08-12' AND '2026-09-04'
+GROUP BY 1,2 HAVING SUM(google_cost)>=200 ORDER BY cost_post DESC NULLS LAST""", show=40)
 
 q('unattributed_check', """
 SELECT campaign_id, campaign_name, MIN(date) mn, MAX(date) mx, ROUND(SUM(google_cost)::numeric,0) cost, ROUND(SUM(amazon_revenue)::numeric,0) rev, COUNT(*) FILTER (WHERE has_attribution) attr_days, COUNT(*) days
-FROM ampd.campaign_daily_complete WHERE date BETWEEN '2026-08-04' AND '2026-09-01' AND campaign_id IN ('23350268344','21839192355') GROUP BY 1,2 ORDER BY 1,3""", show=20)
+FROM ampd.campaign_daily_complete WHERE date BETWEEN '2026-08-06' AND '2026-09-04' AND campaign_id IN ('23350268344','21839192355') GROUP BY 1,2 ORDER BY 1,3""", show=20)
 
 q('ampd_region_windows', f"""
 SELECT w.win, ampd.region_of(campaign_name) region, ROUND(SUM(google_cost)::numeric,0) cost, ROUND(SUM(amazon_revenue)::numeric,0) rev, ROUND(SUM(brand_referral_bonus)::numeric,0) brb, SUM(amazon_conversions) conv,
