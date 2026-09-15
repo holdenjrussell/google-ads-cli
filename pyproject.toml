@@ -13,7 +13,8 @@ authors = [
   { name = "Holden Russell" }
 ]
 dependencies = [
-  "psycopg[binary]>=3.2.0"
+  "psycopg[binary]>=3.2.0",
+  "google-auth[requests]>=2.40,<3"
 ]
 
 [project.optional-dependencies]
