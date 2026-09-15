@@ -33,6 +33,8 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+from . import auth
+
 
 def _preload_env_file(path: pathlib.Path) -> None:
     if not path.exists():
@@ -383,13 +385,16 @@ def credential_state() -> dict[str, Any]:
         "client_secret": bool(os.environ.get("GOOGLE_ADS_CLIENT_SECRET")),
     }
     missing = [name for name in ("developer_token", "customer_id") if not keys[name]]
-    if not keys["access_token"] and not refresh_ready:
+    service_ready = auth.mode() != "oauth" and bool(os.environ.get("GOOGLE_ADS_JSON_KEY_FILE_PATH"))
+    if not keys["access_token"] and not refresh_ready and not service_ready:
         missing.append("access_token_or_refresh_token_set")
     return {
         "ready": not missing,
         "missing": missing,
         "keys": keys,
         "refresh_ready": refresh_ready,
+        "auth_mode": auth.mode(),
+        "service_account_configured": service_ready,
     }
 
 
@@ -432,6 +437,8 @@ def refresh_access_token() -> str | None:
 
 
 def current_access_token() -> str:
+    if auth.mode() != "oauth":
+        return auth.service_account_token()
     token = refresh_access_token()
     if token:
         return token
@@ -1786,7 +1793,24 @@ def log_fetch_error(run_id: str | None, endpoint: str, request_payload: dict[str
 def api_request(method: str, path: str, payload: dict[str, Any] | None = None) -> tuple[Any, dict[str, Any]]:
     url = f"{REST_BASE}/{api_version()}/{path.lstrip('/')}"
     body = None if payload is None else json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=body, method=method.upper(), headers=google_headers())
+    selected = auth.mode()
+    if selected == "auto" and not auth.safe_read_path(method, path):
+        raise auth.CredentialError("Auto credential fallback is restricted to read-only Google Ads endpoints")
+    def oauth_retry():
+        # Do not persistently replace credentials or change the caller's mode.
+        os.environ["GOOGLE_ADS_AUTH_MODE"] = "oauth"
+        try:
+            print("CGK-GADS-ACCESS: service-account path unavailable; using preserved OAuth fallback", file=sys.stderr)
+            return api_request(method, path, payload)
+        finally:
+            os.environ["GOOGLE_ADS_AUTH_MODE"] = selected
+    try:
+        headers = google_headers()
+    except auth.CredentialError:
+        if selected == "auto":
+            return oauth_retry()
+        raise
+    req = urllib.request.Request(url, data=body, method=method.upper(), headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=90) as response:
             text = response.read().decode("utf-8")
@@ -1797,7 +1821,10 @@ def api_request(method: str, path: str, payload: dict[str, Any] | None = None) -
             details = json.loads(text)
         except json.JSONDecodeError:
             details = {"error": text}
-        raise RuntimeError(f"Google Ads API {exc.code}: {json.dumps(details)[:1200]}") from exc
+        summary = auth.error_summary(exc.code, details, dict(exc.headers.items()))
+        if selected == "auto" and auth.permits_oauth_retry(summary):
+            return oauth_retry()
+        raise auth.ApiError(summary) from None
 
 
 def search_gaql(
@@ -12022,6 +12049,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("auth-check")
     sp.set_defaults(func=cmd_auth_check)
+
+    from .auth_canary import command as auth_canary_command
+    sp = sub.add_parser("auth-canary")
+    sp.add_argument("--receipt", help="protected local JSON status receipt")
+    sp.add_argument("--oauth-only", action="store_true", help="diagnose the preserved fallback only")
+    sp.set_defaults(func=auth_canary_command)
 
     sp = sub.add_parser("auth-doctor")
     sp.add_argument("--format", choices=["markdown", "json"], default="markdown")
